@@ -1,0 +1,14 @@
+每天开始工作前
+bash
+git pull
+修改代码后提交
+bash
+git add .
+git commit -m "描述你的修改"
+git push
+查看状态
+bash
+git status
+查看提交历史
+bash
+git log --oneline
