@@ -1,0 +1,33 @@
+根目录 frontend
+1. 文件夹
+node_modules
+npm 安装的所有第三方依赖包（React、Vite 等），体积很大，.gitignore 默认忽略，不用手动修改。
+public
+静态资源目录，放置不经过打包处理的文件：favicon 图标、全局静态图片、第三方 js 库等。
+访问时直接 /文件名，无需 import。
+src（核心业务代码目录）
+所有业务组件、页面、样式、逻辑都写在这里，打包工具只会处理 src 内文件。
+assets：项目内需要 import 引入的静态资源（图片、字体、局部样式），打包时会经过压缩 / 转码。
+2. src 源码文件
+main.jsx：项目入口文件
+挂载 React 根组件到 index.html 的 #root 节点，全局路由、状态库、全局样式、全局组件都在这里引入注册。
+App.jsx：根业务组件
+默认顶层页面，一般用来放路由出口、全局布局。
+index.css：全局样式
+全局重置、通用样式、全局变量，在 main.jsx 全局引入一次。
+App.css：App 组件专属局部样式，只作用于 App.jsx。
+3. 根目录配置文件
+index.html
+Vite 项目真正的 HTML 入口，不是 src 里的；页面根节点 <div id="root"></div>，vite 会自动注入打包后的 js。
+package.json
+项目配置核心：记录依赖、脚本命令（dev/build/preview）、项目名称版本。
+package-lock.json
+锁定依赖精确版本，保证所有人安装依赖版本一致，不要手动修改。
+vite.config.js
+Vite 构建工具配置：端口、代理、路径别名、插件、打包配置、跨域等。
+.oxlintrc.json
+你创建时选的 Oxlint 代码检查规则配置，约束代码格式、语法错误，保存自动校验。
+.gitignore
+Git 忽略文件配置，node_modules、dist、本地缓存、环境变量等不会提交到代码仓库。
+README.md
+项目说明文档：启动命令、依赖、项目介绍、部署说明。

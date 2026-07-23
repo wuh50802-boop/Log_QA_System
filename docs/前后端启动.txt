@@ -1,0 +1,2 @@
+后端：uvicorn main:app --reload --host 0.0.0.0 --port 8000
+前端：npm run dev
