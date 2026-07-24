@@ -78,37 +78,240 @@ class BM25Retriever:
     
     def _tokenize(self, text: str) -> List[str]:
         """
-        中英文混合分词 + 词干提取
+        中英文混合分词 + 词干提取 + 中英文映射（高效版）
         
         策略：
-        1. 英文：正则提取 → 词干提取 → 转为小写
-        2. 中文：jieba 分词
-        3. 合并去重
-        4. 过滤停用词
+        1. 快速检测文本语言类型
+        2. 根据语言类型选择处理策略
+        3. 中英文查询都能匹配英文日志
         """
         if not text or not text.strip():
             return []
         
-        # 1. 转为小写
         text_lower = text.lower()
+        all_tokens = []
         
-        # 2. 提取英文单词（字母，长度>=2）
-        english_tokens = re.findall(r'[a-z]{2,}', text_lower)
+        # 快速检测语言类型
+        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
+        has_english = bool(re.search(r'[a-z]', text_lower))
         
-        # 3. 词干提取（英文）
-        english_tokens = [self.stemmer.stem(t) for t in english_tokens]
-        
-        # 4. 中文分词（使用 jieba）
-        chinese_tokens = []
-        if re.search(r'[\u4e00-\u9fff]', text):
+        # === 情况1：纯中文查询 ===
+        if has_chinese and not has_english:
+            # 中文分词
             chinese_tokens = jieba.lcut(text)
-            # 过滤：只保留中文词（长度>=2）
-            chinese_tokens = [t for t in chinese_tokens if len(t) >= 2 and re.search(r'[\u4e00-\u9fff]', t)]
+            chinese_tokens = [t for t in chinese_tokens if re.search(r'[\u4e00-\u9fff]', t) and len(t) >= 1]
+            all_tokens.extend(chinese_tokens)
+            
+            # 中英文映射（为每个中文词添加英文同义词）
+            for cn_token in chinese_tokens:
+                all_tokens.extend(self._map_chinese_to_english(cn_token))
         
-        # 5. 合并所有 token
-        all_tokens = english_tokens + chinese_tokens
+        # === 情况2：纯英文查询 ===
+        elif has_english and not has_chinese:
+            # 提取英文单词
+            english_tokens = re.findall(r'[a-z]{2,}', text_lower)
+            # 词干提取
+            english_tokens = [self.stemmer.stem(t) for t in english_tokens if len(t) >= 2]
+            all_tokens.extend(english_tokens)
         
-        # 6. 过滤停用词
+        # === 情况3：中英文混合查询 ===
+        else:
+            # 处理英文部分
+            if has_english:
+                english_tokens = re.findall(r'[a-z]{2,}', text_lower)
+                english_tokens = [self.stemmer.stem(t) for t in english_tokens if len(t) >= 2]
+                all_tokens.extend(english_tokens)
+            
+            # 处理中文部分
+            if has_chinese:
+                chinese_tokens = jieba.lcut(text)
+                chinese_tokens = [t for t in chinese_tokens if re.search(r'[\u4e00-\u9fff]', t) and len(t) >= 1]
+                all_tokens.extend(chinese_tokens)
+                
+                # 中英文映射
+                for cn_token in chinese_tokens:
+                    all_tokens.extend(self._map_chinese_to_english(cn_token))
+        
+        # 过滤停用词
+        stopwords = self._get_stopwords()
+        all_tokens = [t for t in all_tokens if t not in stopwords and len(t) >= 2]
+        
+        # 去重（保持顺序）
+        seen = set()
+        unique_tokens = []
+        for token in all_tokens:
+            if token not in seen:
+                seen.add(token)
+                unique_tokens.append(token)
+        
+        return unique_tokens
+
+    def _map_chinese_to_english(self, chinese_word: str) -> List[str]:
+        """
+        将中文词映射为英文同义词（包含词干形式）
+        
+        Args:
+            chinese_word: 中文词
+        
+        Returns:
+            英文同义词列表（包含原词和词干形式）
+        """
+        result = []
+        
+        # 中英文映射字典
+        cn_en_map = {
+            # 技术术语
+            '数据库': 'database',
+            '连接': 'connection',
+            '超时': 'timeout',
+            '失败': 'failure',
+            '错误': 'error',
+            '异常': 'exception',
+            '服务': 'service',
+            '登录': 'login',
+            '用户': 'user',
+            '认证': 'authentication auth',
+            '授权': 'authorization',
+            '权限': 'permission',
+            '缓存': 'cache',
+            '内存': 'memory',
+            '磁盘': 'disk',
+            '网络': 'network',
+            '请求': 'request',
+            '响应': 'response',
+            '重试': 'retry',
+            '空指针': 'nullpointer null',
+            '文件': 'file',
+            '未找到': 'notfound',
+            '配置': 'config configuration',
+            '参数': 'parameter param',
+            '无效': 'invalid',
+            '有效': 'valid',
+            '警告': 'warning',
+            '信息': 'info',
+            '调试': 'debug',
+            '追踪': 'trace',
+            
+            # 日志相关
+            '日志': 'log',
+            '记录': 'record',
+            '消息': 'message',
+            '堆栈': 'stack',
+            '跟踪': 'trace',
+            '调用': 'call',
+            '方法': 'method',
+            '函数': 'function func',
+            '类': 'class',
+            '对象': 'object',
+            '实例': 'instance',
+            '线程': 'thread',
+            '进程': 'process',
+            
+            # 系统相关
+            '系统': 'system',
+            '应用': 'application app',
+            '程序': 'program',
+            '模块': 'module',
+            '组件': 'component',
+            '接口': 'interface',
+            '端点': 'endpoint',
+            '路径': 'path',
+            '路由': 'route',
+            '端口': 'port',
+            '主机': 'host',
+            '地址': 'address',
+            
+            # 操作相关
+            '添加': 'add',
+            '删除': 'delete del',
+            '更新': 'update',
+            '修改': 'modify',
+            '创建': 'create',
+            '读取': 'read',
+            '写入': 'write',
+            '执行': 'execute exec',
+            '运行': 'run',
+            '启动': 'start',
+            '停止': 'stop',
+            '重启': 'restart',
+            
+            # 状态相关
+            '成功': 'success',
+            '完成': 'complete',
+            '处理中': 'processing',
+            '待处理': 'pending',
+            '阻塞': 'block',
+            '死锁': 'deadlock',
+            '溢出': 'overflow',
+            '泄漏': 'leak',
+            '损坏': 'corrupt',
+            '丢失': 'lost',
+            
+            # 业务相关
+            '订单': 'order',
+            '支付': 'payment',
+            '账单': 'bill',
+            '账户': 'account',
+            '余额': 'balance',
+            '交易': 'transaction',
+            '商品': 'product',
+            '库存': 'inventory',
+            '价格': 'price',
+            '数量': 'quantity',
+            '管理员': 'admin',
+            
+            # 数据库相关
+            '查询': 'query',
+            '插入': 'insert',
+            '删除': 'delete',
+            '更新': 'update',
+            '事务': 'transaction',
+            '索引': 'index',
+            '表': 'table',
+            '字段': 'field column',
+            '主键': 'primarykey pk',
+            '外键': 'foreignkey fk',
+            '连接池': 'connectionpool pool',
+            
+            # 网络相关
+            '超时': 'timeout',
+            '重试': 'retry',
+            '断路器': 'circuitbreaker',
+            '限流': 'ratelimit',
+            '降级': 'degrade',
+            '熔断': 'fuse',
+        }
+        
+        # 1. 精确匹配
+        if chinese_word in cn_en_map:
+            en_terms = cn_en_map[chinese_word].split()
+            for en_term in en_terms:
+                if en_term:
+                    result.append(en_term)
+                    # 添加词干形式（仅对英文词）
+                    if re.match(r'^[a-z]+$', en_term):
+                        result.append(self.stemmer.stem(en_term))
+        
+        # 2. 部分匹配（处理复合词，如 "数据库连接"）
+        else:
+            for cn_key, en_value in cn_en_map.items():
+                if cn_key in chinese_word:
+                    en_terms = en_value.split()
+                    for en_term in en_terms:
+                        if en_term:
+                            result.append(en_term)
+                            if re.match(r'^[a-z]+$', en_term):
+                                result.append(self.stemmer.stem(en_term))
+        
+        return result
+    
+    def _get_stopwords(self) -> set:
+        """
+        获取停用词集合（缓存为类属性，避免重复创建）
+        """
+        if hasattr(self, '_stopwords_cache'):
+            return self._stopwords_cache
+        
         stopwords = {
             # 英文停用词
             'a', 'an', 'the', 'of', 'to', 'for', 'on', 'in', 'at', 'by',
@@ -125,18 +328,10 @@ class BM25Retriever:
             '着', '没有', '看', '好', '自己', '这', '那', '它', '他', '她',
             '但', '而', '与', '或', '且', '并', '等', '地', '得', '着',
         }
-        all_tokens = [t for t in all_tokens if t not in stopwords and len(t) >= 2]
         
-        # 7. 去重（保持顺序）
-        seen = set()
-        unique_tokens = []
-        for token in all_tokens:
-            if token not in seen:
-                seen.add(token)
-                unique_tokens.append(token)
+        self._stopwords_cache = stopwords
+        return stopwords
         
-        return unique_tokens
-    
     def build_index(self, corpus: List[Dict[str, Any]]) -> None:
         """构建 BM25 索引"""
         if not corpus:

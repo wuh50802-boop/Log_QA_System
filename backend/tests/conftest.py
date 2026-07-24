@@ -5,15 +5,13 @@ pytest 配置文件
 import sys
 import os
 import pytest
-from typing import Generator
 
 # 添加项目根目录到 Python 路径
-# 这样测试文件就可以直接 import services 等模块了
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
-# 可选：设置测试环境变量
+# 设置测试环境变量
 os.environ.setdefault("TESTING", "true")
 
 
@@ -83,25 +81,13 @@ def test_queries():
     ]
 
 
-# ============ Pytest 钩子 ============
+# ============ Pytest 钩子（保留） ============
 
-def pytest_configure(config):
-    """pytest 启动时的配置"""
-    # 添加自定义标记
-    config.addinivalue_line(
-        "markers", "slow: 标记为慢速测试，运行时间较长"
-    )
-    config.addinivalue_line(
-        "markers", "integration: 标记为集成测试，需要外部服务"
-    )
-    config.addinivalue_line(
-        "markers", "unit: 标记为单元测试，不需要外部服务"
-    )
-
+# 移除 pytest_configure，因为标记已在 pytest.ini 中定义
+# 但保留其他钩子
 
 def pytest_collection_modifyitems(config, items):
     """修改测试收集时的行为"""
-    # 根据标记自动跳过某些测试
     for item in items:
         # 如果标记了 integration 且没有设置 INTEGRATION_TEST 环境变量，则跳过
         if "integration" in item.keywords:
@@ -121,8 +107,6 @@ def pytest_collection_modifyitems(config, items):
                     )
                 )
 
-
-# ============ 打印测试信息 ============
 
 def pytest_sessionstart(session):
     """测试会话开始时的打印信息"""
