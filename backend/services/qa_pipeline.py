@@ -552,8 +552,8 @@ class QAPipeline:
         if not logs:
             return "低"
 
-        # 检查是否有引用
-        has_ref = bool(re.search(r'\[ID:\d+\]', answer))
+        # 检查是否有引用（支持 [ID:xxx] 和 [n] 两种格式）
+        has_ref = bool(re.search(r'\[ID:\d+\]', answer)) or bool(re.search(r'\[\d+\]', answer))
         has_sections = all(k in answer for k in ['【问题理解】', '【关键证据】', '【分析推断】', '【结论建议】'])
         
         if has_ref and has_sections and len(logs) >= 3:
