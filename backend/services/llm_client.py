@@ -21,7 +21,7 @@ class DeepSeekConfig:
     """DeepSeek API 配置"""
     api_key: str = os.getenv("DEEPSEEK_API_KEY", "")
     base_url: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-    model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")  # 改为 chat 版本更快
+    model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     max_retries: int = 3
     retry_delay: float = 1.0
     timeout: float = 30.0  # 降低超时时间

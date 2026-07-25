@@ -2,9 +2,11 @@ import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
+import AdminRoute from './components/AdminRoute';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
+import UserManagement from './pages/UserManagement';
 import './App.css';
 
 function App() {
@@ -19,6 +21,17 @@ function App() {
             element={
               <ProtectedRoute>
                 <Dashboard />
+              </ProtectedRoute>
+            } 
+          />
+          {/* admin 专属：用户管理 */}
+          <Route 
+            path="/admin/users" 
+            element={
+              <ProtectedRoute>
+                <AdminRoute>
+                  <UserManagement />
+                </AdminRoute>
               </ProtectedRoute>
             } 
           />

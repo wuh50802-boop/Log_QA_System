@@ -33,8 +33,10 @@ const Register = () => {
 
     setLoading(true);
     try {
+      // 后端会强制把新注册用户的角色设为 user，
+      // 如需 admin 角色需登录后由现有 admin 通过用户管理接口提升。
       await registerApi(username, password);
-      setSuccess('注册成功！即将跳转到登录页...');
+      setSuccess('注册成功！默认为普通用户角色。即将跳转到登录页...');
       setTimeout(() => {
         navigate('/login');
       }, 2000);
@@ -50,7 +52,7 @@ const Register = () => {
     <div className="login-container">
       <div className="login-card">
         <div className="login-header">
-          <h1>📊 日志智能问答系统</h1>
+          <h1>日志智能问答系统</h1>
           <p>创建新账号</p>
         </div>
 
@@ -64,6 +66,7 @@ const Register = () => {
               onChange={(e) => setUsername(e.target.value)}
               placeholder="请输入用户名（至少3个字符）"
               disabled={loading}
+              autoComplete="username"
               autoFocus
             />
           </div>
@@ -77,6 +80,7 @@ const Register = () => {
               onChange={(e) => setPassword(e.target.value)}
               placeholder="请输入密码（至少6个字符）"
               disabled={loading}
+              autoComplete="new-password"
             />
           </div>
 
@@ -89,15 +93,23 @@ const Register = () => {
               onChange={(e) => setConfirmPassword(e.target.value)}
               placeholder="请再次输入密码"
               disabled={loading}
+              autoComplete="new-password"
             />
           </div>
 
-          {error && <div className="error-message">❌ {error}</div>}
-          {success && <div className="success-message">✅ {success}</div>}
+          {/* 角色说明：注册时无法选择角色，避免越权 */}
+          <div className="role-info-box">
+            <strong>角色说明</strong>
+            <p>新注册用户默认为 <strong>普通用户（user）</strong>。</p>
+            <p>如需 <strong>管理员（admin）</strong> 权限，请先注册并联系现有管理员在系统内提升你的角色。</p>
+          </div>
 
-          <button 
-            type="submit" 
-            className="login-btn" 
+          {error && <div className="error-message">{error}</div>}
+          {success && <div className="success-message">{success}</div>}
+
+          <button
+            type="submit"
+            className="login-btn"
             disabled={loading}
           >
             {loading ? '注册中...' : '注 册'}

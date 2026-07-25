@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from api import auth
+from api import auth, qa
 
 # 配置日志
 logging.basicConfig(
@@ -73,6 +73,9 @@ def warmup():
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("🚀 应用启动中...")
+    # 初始化数据库（建表 + 轻量级迁移，幂等）
+    from core.database import init_db
+    init_db()
     warmup()
     logger.info("✅ 应用启动完成！")
     
@@ -93,15 +96,52 @@ async def lifespan(app: FastAPI):
 # ============ 创建应用 ============
 app = FastAPI(
     title="日志智能问答系统 API",
-    description="基于LLM的应用运行日志智能问答系统",
+    description="""
+## 基于 LLM + RAG 的应用运行日志智能问答系统
+
+### 核心能力
+- **混合检索**:BGE 向量检索 + BM25 关键词检索,RRF 融合排序
+- **证据链问答**:DeepSeek LLM 基于检索日志生成结构化五段式回答
+- **来源溯源**:回答中标注 `[1] [2]` 引用,可追溯至原始日志
+- **流式输出**:SSE 逐字输出,实时响应
+- **质量自检**:幻觉检测、分段完整性校验
+
+### 接口分组
+- **认证**:用户注册、登录、登出、获取当前用户信息
+- **问答**:同步问答、流式问答、历史记录查询、用户反馈
+
+### 认证方式
+除注册/登录外,所有接口需在请求头携带 JWT Token:
+```
+Authorization: Bearer <access_token>
+```
+""",
     version="1.0.0",
     lifespan=lifespan,
+    openapi_tags=[
+        {
+            "name": "认证",
+            "description": "用户注册、登录、登出、获取当前用户信息。登录后返回 JWT Token,用于后续接口认证。",
+        },
+        {
+            "name": "问答",
+            "description": "智能问答核心接口:同步问答、SSE 流式问答、问答历史查询、点赞/点踩反馈。",
+        },
+        {
+            "name": "系统",
+            "description": "系统健康检查端点,用于服务监控和容器探针。",
+        },
+    ],
 )
 
 # CORS配置
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -109,12 +149,15 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
+app.include_router(qa.router, prefix="/api/qa", tags=["问答"])
 
 # 健康检查
-@app.get("/")
+@app.get("/", summary="根路径健康检查", tags=["系统"])
 async def root():
+    """系统根路径,返回服务状态。"""
     return {"message": "日志智能问答系统运行中", "status": "healthy"}
 
-@app.get("/health")
+@app.get("/health", summary="健康检查", tags=["系统"])
 async def health_check():
+    """轻量级健康检查端点,用于负载均衡/容器探针。"""
     return {"status": "healthy"}

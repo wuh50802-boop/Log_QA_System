@@ -34,4 +34,42 @@ def init_db():
     """初始化数据库：创建所有表"""
     from models import user, log, qa_history, audit_log
     Base.metadata.create_all(bind=engine)
+    _ensure_schema_migrations()
     print("✅ 数据库表创建完成")
+
+
+def _ensure_schema_migrations():
+    """
+    轻量级迁移：为已存在的表补充新字段。
+    SQLite 的 CREATE TABLE IF NOT EXISTS 不会添加新列，所以需要 ALTER TABLE。
+    幂等：列已存在时跳过。
+    """
+    from sqlalchemy import text, inspect
+
+    inspector = inspect(engine)
+
+    if "qa_history" in inspector.get_table_names():
+        existing_columns = {col["name"] for col in inspector.get_columns("qa_history")}
+        if "conversation_id" not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE qa_history ADD COLUMN conversation_id VARCHAR(64)"
+                    )
+                )
+                # SQLite 不支持 CREATE INDEX IF NOT EXISTS 之前的 ALTER，单独建索引
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_qa_history_conversation_id "
+                        "ON qa_history (conversation_id)"
+                    )
+                )
+            print("✅ 已迁移 qa_history 表：新增 conversation_id 列")
+        if "quality_check" not in existing_columns:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE qa_history ADD COLUMN quality_check TEXT"
+                    )
+                )
+            print("✅ 已迁移 qa_history 表：新增 quality_check 列")

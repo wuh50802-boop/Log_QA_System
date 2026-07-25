@@ -143,14 +143,14 @@ class QualityChecker:
             return {
                 'type': 'issue',
                 'message': '回答引用了日志但未标注具体来源，请使用 [ID:xxx] 或 [n] 格式',
-                'penalty': 20,
+                'penalty': 12,
                 'suggestion': '在引用日志时添加来源标注，如 [ID:6789] 或 [1]'
             }
-        
+
         if not sources and not has_citation:
             # 没有来源，但也没有引用，可以接受
             return None
-        
+
         # 检查引用的日志是否在来源中
         if sources and has_citation:
             source_ids = [str(s.get('log_id', '')) for s in sources if s.get('log_id')]
@@ -161,35 +161,34 @@ class QualityChecker:
                     return {
                         'type': 'warning',
                         'message': f'引用的日志ID [{ref}] 不在提供的来源列表中',
-                        'penalty': 10,
+                        'penalty': 6,
                         'suggestion': '确保引用的日志ID与来源列表匹配'
                     }
-        
+
         return None
     
-    def _check_hallucination_patterns(self, answer: str, sources: List[Dict[str, Any]], 
+    def _check_hallucination_patterns(self, answer: str, sources: List[Dict[str, Any]],
                                        confidence: str) -> Optional[Dict[str, Any]]:
         """
-        检查是否包含常见的幻觉模式
+        检查是否包含常见的幻觉模式（仅检测明确的外部知识话术，避免误伤通用表述）
         """
         hallucination_patterns = [
-            (r'我[的]?[知]?道[你]?[们]?[的]?系统', '使用了未经日志证实的系统知识'),
-            (r'通常[来]?[说]?[而]?[言]?', '使用了通用知识而非日志证据'),
-            (r'一般[来]?[说]?[而]?[言]?', '使用了通用知识而非日志证据'),
-            (r'可能[是]?[因]?[为]?.*[但]?[我]?[没]?[有]?[在]?[日]?[志]?[中]?[看]?[到]?', '推测性内容缺乏证据支持'),
-            (r'我[的]?[经]?[验]?[告]?[诉]?[我]?', '使用了个人经验而非日志证据'),
-            (r'根据[我]?[的]?[了]?[解]?', '可能使用了外部知识'),
+            (r'我[的]?[经]?[验]?[告]?[诉]?[我]', '使用了个人经验而非日志证据'),
+            (r'根据[我]?[的]?[了]?[解]', '可能使用了外部知识'),
+            (r'据[我]?[所]?[知]', '可能使用了外部知识'),
+            (r'一般来[说讲]', '使用了通用知识而非日志证据'),
+            (r'通常来[说讲]', '使用了通用知识而非日志证据'),
         ]
-        
+
         for pattern, message in hallucination_patterns:
             if re.search(pattern, answer):
                 return {
                     'type': 'warning',
                     'message': f'检测到可能幻觉: {message}',
-                    'penalty': 15,
+                    'penalty': 8,
                     'suggestion': '回答应严格基于提供的日志证据，避免使用外部知识'
                 }
-        
+
         return None
     
     def _check_confidence_alignment(self, answer: str, sources: List[Dict[str, Any]], 
@@ -220,21 +219,21 @@ class QualityChecker:
             return {
                 'type': 'warning',
                 'message': f'置信度标注为"高"但证据充分度较低（{evidence_score}/100）',
-                'penalty': 10,
+                'penalty': 6,
                 'suggestion': '建议将置信度调整为"中"或"低"'
             }
-        
+
         if confidence == "低" and evidence_score > 70:
             return {
                 'type': 'warning',
                 'message': f'置信度标注为"低"但证据充分度较高（{evidence_score}/100）',
-                'penalty': 5,
+                'penalty': 3,
                 'suggestion': '建议将置信度调整为"高"或"中"'
             }
-        
+
         return None
     
-    def _check_evidence_sufficiency(self, answer: str, sources: List[Dict[str, Any]], 
+    def _check_evidence_sufficiency(self, answer: str, sources: List[Dict[str, Any]],
                                      confidence: str) -> Optional[Dict[str, Any]]:
         """
         检查证据是否足以支持结论
@@ -246,45 +245,131 @@ class QualityChecker:
                 'penalty': 30,
                 'suggestion': '当没有相关日志时，应明确告知用户"未找到相关日志"'
             }
-        
+
         # 检查是否承认证据不足
-        admits_insufficient = any(kw in answer for kw in ['证据不足', '未找到', '没有相关', '无法确认', '可能', '需要更多'])
-        
-        if len(sources) <= 2 and not admits_insufficient:
+        admits_insufficient = any(kw in answer for kw in ['证据不足', '未找到', '没有相关', '无法确认', '需要更多'])
+
+        # 仅当只有 1 条日志且未承认证据不足时才提示
+        if len(sources) <= 1 and not admits_insufficient:
             return {
                 'type': 'warning',
                 'message': f'只有 {len(sources)} 条日志，但回答未表明证据可能不足',
-                'penalty': 10,
+                'penalty': 5,
                 'suggestion': '建议在回答中加入"证据有限"或"建议查看更多日志"的说明'
             }
-        
+
         return None
     
-    def _check_reasoning_consistency(self, answer: str, sources: List[Dict[str, Any]], 
+    def _check_reasoning_consistency(self, answer: str, sources: List[Dict[str, Any]],
                                       confidence: str) -> Optional[Dict[str, Any]]:
         """
-        检查推理逻辑是否一致
+        检查推理逻辑是否一致。
+
+        改进点：
+        - 按句子粒度检测（句号/换行切分），避免跨句误报
+        - 排除否定上下文：「未/没/无/不」+ 反义词，是在陈述"没出现 X"，不是矛盾
+        - 排除对比上下文：
+          a) 句中出现「或/和/与/、」等并列连接词 → 不同事件对比
+          b) 转折词「但/却」+ 不同主语 → 不同事件对比
+          c) 转折词「但/却」+ 同主语 → 真矛盾
+        - penalty 从 15 降到 8，避免误报对总分影响过大
         """
-        # 检查是否自相矛盾
-        contradiction_patterns = [
-            (r'没有.*错误', r'出现.*错误'),
-            (r'正常', r'异常'),
+        contradiction_pairs = [
             (r'成功', r'失败'),
+            (r'正常', r'异常'),
+            (r'正常', r'错误'),
+            (r'已恢复', r'故障'),
+            (r'可用', r'不可用'),
         ]
-        
-        for pattern1, pattern2 in contradiction_patterns:
-            if re.search(pattern1, answer) and re.search(pattern2, answer):
-                # 检查是否在上下文中合理（简单检测）
-                pos1 = answer.find(re.search(pattern1, answer).group() if re.search(pattern1, answer) else '')
-                pos2 = answer.find(re.search(pattern2, answer).group() if re.search(pattern2, answer) else '')
-                if pos1 != -1 and pos2 != -1 and abs(pos1 - pos2) < 500:
-                    return {
-                        'type': 'issue',
-                        'message': f'检测到可能的逻辑矛盾: "{pattern1}" 和 "{pattern2}"',
-                        'penalty': 20,
-                        'suggestion': '检查推理逻辑是否一致'
-                    }
-        
+
+        # 否定词前缀：当反义词前出现这些词时，是在陈述"没出现 X"，不算矛盾
+        negation_prefixes = ['未', '没', '无', '不', '尚未', '并非', '没有']
+
+        # 并列对比连接词：明确列举两个事件，不算矛盾
+        parallel_connectors = ['或', '和', '与', '、', '还是', '或者']
+
+        # 转折词：需进一步判断主语是否相同
+        transition_connectors = ['但', '但是', '却', '然而', '不过']
+
+        # 按句号/问号/换行切分
+        sentences = re.split(r'[。.！!？?\n]+', answer)
+
+        for sentence in sentences:
+            for word1, word2 in contradiction_pairs:
+                # 找出句子中两个反义词的位置
+                m1 = re.search(word1, sentence)
+                m2 = re.search(word2, sentence)
+                if not (m1 and m2):
+                    continue
+
+                pos1, pos2 = sorted([m1.start(), m2.start()])
+
+                # 检查反义词前面是否有否定词（"未失败"、"没异常"）
+                prefix_before_2 = sentence[max(0, pos2 - 5):pos2]
+                prefix_before_1 = sentence[max(0, pos1 - 5):pos1]
+                if any(neg in prefix_before_2 for neg in negation_prefixes):
+                    continue
+                if any(neg in prefix_before_1 for neg in negation_prefixes):
+                    continue
+
+                between = sentence[pos1 + len(word1):pos2]
+
+                # 情况 a: 并列连接词 → 对比，不算矛盾
+                if any(conn in between for conn in parallel_connectors):
+                    continue
+
+                # 情况 b/c: 转折词 → 需判断主语是否相同
+                has_transition = any(conn in between for conn in transition_connectors)
+                if has_transition:
+                    # 找出 between 中转折词结束位置
+                    transition_end = 0
+                    for w in transition_connectors:
+                        idx = between.find(w)
+                        if idx >= 0:
+                            transition_end = max(transition_end, idx + len(w))
+
+                    # subj1：反义词1之前的内容（到上一个标点或句子开头）
+                    prefix1 = sentence[:pos1]
+                    # 从后往前找标点
+                    last_punct_1 = max(
+                        prefix1.rfind('，'), prefix1.rfind(','), prefix1.rfind('、'),
+                        prefix1.rfind('：'), prefix1.rfind(':')
+                    )
+                    subj1_raw = prefix1[last_punct_1 + 1:] if last_punct_1 >= 0 else prefix1
+
+                    # subj2：转折词之后到反义词2之间的内容
+                    subj2_raw = between[transition_end:]
+
+                    # 去掉标点和空格
+                    def _clean_subject(s: str) -> str:
+                        return re.sub(r'[，,。.！!？?\s、（）()【】[\]]', '', s)
+
+                    subj1 = _clean_subject(subj1_raw)
+                    subj2 = _clean_subject(subj2_raw)
+
+                    # 主语片段重叠（任一包含另一，且长度 >= 2）→ 同主语 → 矛盾
+                    if (
+                        len(subj1) >= 2 and len(subj2) >= 2
+                        and (subj1 in subj2 or subj2 in subj1)
+                    ):
+                        # 同主语转折 → 真矛盾
+                        return {
+                            'type': 'issue',
+                            'message': f'同一主体既"{word1}"又"{word2}"，可能存在逻辑矛盾',
+                            'penalty': 8,
+                            'suggestion': '检查推理逻辑是否一致，或明确对比/否定关系'
+                        }
+                    # 主语不同 → 对比，不算矛盾
+                    continue
+
+                # 同句内同时出现两个反义词，无否定/对比/转折上下文 → 真矛盾
+                return {
+                    'type': 'issue',
+                    'message': f'同一句中同时出现"{word1}"与"{word2}"，可能存在逻辑矛盾',
+                    'penalty': 8,
+                    'suggestion': '检查推理逻辑是否一致，或明确对比/否定关系'
+                }
+
         return None
     
     def _check_section_completeness(self, answer: str, sources: List[Dict[str, Any]], 
@@ -303,10 +388,10 @@ class QualityChecker:
             return {
                 'type': 'warning',
                 'message': f'缺少以下部分: {", ".join(missing_sections)}',
-                'penalty': 10,
+                'penalty': 5,
                 'suggestion': '按照建议格式组织回答'
             }
-        
+
         return None
 
 

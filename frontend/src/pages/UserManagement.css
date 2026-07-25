@@ -1,0 +1,605 @@
+/* ============================================================
+   用户管理页面样式（黑白灰）
+   ============================================================ */
+
+.user-mgmt-container {
+  min-height: 100vh;
+  background: var(--bg-page);
+}
+
+/* 顶部导航 */
+.user-mgmt-header {
+  background: var(--bg-surface);
+  padding: 12px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-default);
+  height: 56px;
+}
+
+.user-mgmt-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xl);
+}
+
+.user-mgmt-header h1 {
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.user-mgmt-nav {
+  display: flex;
+  gap: var(--space-lg);
+}
+
+.back-link {
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: var(--text-base);
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  transition: var(--transition);
+}
+
+.back-link:hover {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+
+.user-mgmt-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+}
+
+.user-mgmt-user .role-badge {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  padding: 2px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  border: 1px solid var(--border-default);
+}
+
+/* 主区域 */
+.user-mgmt-main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-xl);
+}
+
+/* 统计卡片 */
+.user-mgmt-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-lg);
+  margin-bottom: var(--space-xl);
+}
+
+.user-mgmt-stat-card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  text-align: center;
+  border: 1px solid var(--border-default);
+}
+
+.user-mgmt-stat-card.stat-admin {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.user-mgmt-stat-card.stat-admin .stat-value,
+.user-mgmt-stat-card.stat-admin .stat-label {
+  color: var(--text-inverse);
+}
+
+.user-mgmt-stat-card.stat-user {
+  background: var(--bg-subtle);
+  border-color: var(--border-default);
+}
+
+.user-mgmt-stat-card .stat-value {
+  font-size: var(--text-xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-xs);
+  letter-spacing: -0.02em;
+}
+
+.user-mgmt-stat-card .stat-label {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
+/* 列表卡片 */
+.user-mgmt-card {
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  padding: var(--space-xl);
+  border: 1px solid var(--border-default);
+}
+
+.user-mgmt-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-md);
+}
+
+.user-mgmt-card-header h2 {
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.refresh-btn {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  transition: var(--transition);
+}
+
+.refresh-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 搜索框 */
+.user-search-bar {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  margin-bottom: var(--space-md);
+}
+
+.user-search-input {
+  flex: 1;
+  max-width: 360px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  outline: none;
+  transition: var(--transition);
+  background: var(--bg-surface);
+}
+
+.user-search-input:focus {
+  border-color: var(--accent);
+}
+
+.user-search-input::placeholder {
+  color: var(--text-faint);
+}
+
+.user-search-btn {
+  padding: 6px 16px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-base);
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.user-search-btn:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.user-search-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.user-search-clear {
+  padding: 6px 12px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-base);
+  transition: var(--transition);
+}
+
+.user-search-clear:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.user-search-result {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin-bottom: var(--space-md);
+  padding: 6px 10px;
+  background: var(--bg-subtle);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--border-strong);
+}
+
+/* 错误/提示 */
+.user-mgmt-error {
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--accent);
+  margin-bottom: var(--space-md);
+  font-size: var(--text-base);
+}
+
+.user-mgmt-toast {
+  padding: 10px 14px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-radius: var(--radius-sm);
+  margin-bottom: var(--space-md);
+  font-size: var(--text-base);
+}
+
+.user-mgmt-loading,
+.user-mgmt-empty {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-base);
+}
+
+/* 表格 */
+.user-mgmt-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+.user-mgmt-table thead {
+  background: var(--bg-subtle);
+}
+
+.user-mgmt-table th {
+  padding: 10px 14px;
+  text-align: left;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  border-bottom: 1px solid var(--border-default);
+  text-transform: none;
+}
+
+.user-mgmt-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-primary);
+}
+
+.user-mgmt-table tr:hover {
+  background: var(--bg-subtle);
+}
+
+.user-mgmt-table tr.row-self {
+  background: var(--bg-muted);
+}
+
+.user-mgmt-table tr.row-self:hover {
+  background: var(--bg-muted);
+}
+
+.cell-id {
+  color: var(--text-muted);
+  font-family: 'SF Mono', Monaco, Consolas, monospace;
+  font-size: var(--text-xs);
+}
+
+.cell-username {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.self-tag {
+  margin-left: var(--space-sm);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+
+.cell-role {
+  /* 占位 */
+}
+
+.role-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.role-pill.role-admin {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: 1px solid var(--accent);
+}
+
+.role-pill.role-user {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
+}
+
+.cell-time {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+/* 操作按钮 */
+.cell-action .action-group {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.action-disabled {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-style: italic;
+}
+
+.role-toggle-btn {
+  padding: 4px 12px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  transition: var(--transition);
+  background: var(--bg-surface);
+}
+
+/* 提升：填充黑色（强调正向操作） */
+.role-toggle-btn.btn-promote {
+  color: var(--text-inverse);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.role-toggle-btn.btn-promote:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* 降级：轮廓（弱化负向操作） */
+.role-toggle-btn.btn-downgrade {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-surface);
+}
+
+.role-toggle-btn.btn-downgrade:hover:not(:disabled) {
+  background: var(--bg-muted);
+  border-color: var(--accent);
+}
+
+.role-toggle-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 删除：黑色轮廓按钮，hover 时反白 */
+.delete-btn {
+  padding: 4px 12px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-heavy);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.delete-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-color: var(--accent);
+}
+
+.delete-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 提示文案 */
+.user-mgmt-tip {
+  margin-top: var(--space-md);
+  padding: 10px 14px;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  border-left: 2px solid var(--border-strong);
+}
+
+/* 确认弹窗 */
+.confirm-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.confirm-dialog {
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  width: 90%;
+  max-width: 440px;
+  padding: 22px;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border-default);
+}
+
+.confirm-dialog-danger {
+  border-top: 3px solid var(--accent);
+}
+
+.confirm-dialog h3 {
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.confirm-dialog p {
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.confirm-warn {
+  color: var(--text-muted) !important;
+  font-size: var(--text-sm) !important;
+  margin-top: var(--space-sm) !important;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.cancel-btn {
+  padding: 6px 16px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-base);
+  transition: var(--transition);
+}
+
+.cancel-btn:hover:not(:disabled) {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.cancel-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.confirm-btn {
+  padding: 6px 16px;
+  border: 1px solid;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: var(--text-base);
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.confirm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 角色变更确认：主按钮（黑色填充） */
+.confirm-btn.confirm-btn-primary {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-color: var(--accent);
+}
+
+.confirm-btn.confirm-btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+/* 删除确认：黑底白字 + 粗边框（视觉更强） */
+.confirm-btn.btn-danger {
+  background: var(--accent-active);
+  color: var(--text-inverse);
+  border-color: var(--accent-active);
+}
+
+.confirm-btn.btn-danger:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+/* 响应式 */
+@media (max-width: 768px) {
+  .user-mgmt-stats {
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-sm);
+  }
+
+  .user-mgmt-stat-card {
+    padding: 10px;
+  }
+
+  .user-mgmt-stat-card .stat-value {
+    font-size: var(--text-lg);
+  }
+
+  .user-mgmt-main {
+    padding: var(--space-lg);
+  }
+
+  .user-mgmt-card {
+    padding: var(--space-lg);
+  }
+
+  .user-mgmt-table {
+    font-size: var(--text-sm);
+  }
+
+  .user-mgmt-table th,
+  .user-mgmt-table td {
+    padding: var(--space-sm) 6px;
+  }
+
+  .cell-time {
+    display: none;
+  }
+
+  .user-search-input {
+    max-width: none;
+  }
+}

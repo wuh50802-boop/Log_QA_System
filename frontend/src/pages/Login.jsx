@@ -33,7 +33,7 @@ const Login = () => {
     <div className="login-container">
       <div className="login-card">
         <div className="login-header">
-          <h1>📊 日志智能问答系统</h1>
+          <h1>日志智能问答系统</h1>
           <p>{isRegistering ? '创建新账号' : '登录以继续'}</p>
         </div>
 
@@ -65,7 +65,7 @@ const Login = () => {
 
           {(localError || error) && (
             <div className="error-message">
-              ❌ {localError || error}
+              {localError || error}
             </div>
           )}
 

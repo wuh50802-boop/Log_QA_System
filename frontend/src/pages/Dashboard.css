@@ -1,113 +1,135 @@
+/* ============================================================
+   Dashboard 主页（黑白灰风格）
+   顶部品牌栏 + 侧边栏同色融合，包裹圆角内容卡片
+   ============================================================ */
+
 .dashboard-container {
-  min-height: 100vh;
-  background: #f5f7fa;
-}
-
-.dashboard-header {
-  background: white;
-  padding: 16px 32px;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--bg-subtle);
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  flex-direction: column;
 }
 
-.dashboard-header h1 {
-  font-size: 20px;
-  color: #333;
-  margin: 0;
-}
-
-.user-info {
+/* 顶部品牌栏：贯穿全宽，与侧边栏同色融合 */
+.dashboard-topbar {
+  height: 56px;
+  flex-shrink: 0;
+  background: var(--bg-subtle);
+  padding: 0 var(--space-xl);
   display: flex;
   align-items: center;
-  gap: 16px;
 }
 
-.role-badge {
-  background: #667eea;
-  color: white;
-  padding: 2px 12px;
-  border-radius: 12px;
-  font-size: 12px;
+.dashboard-brand {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
 }
 
-.logout-btn {
-  padding: 8px 20px;
-  background: #fee;
-  color: #c0392b;
-  border: 1px solid #fcc;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  transition: all 0.2s;
-}
-
-.logout-btn:hover {
-  background: #fdd;
-}
-
+/* 主区域：侧边栏 + 聊天 */
 .dashboard-main {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 32px;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
-.welcome-card {
-  background: white;
-  padding: 32px;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-  margin-bottom: 24px;
+.dashboard-sidebar {
+  flex-shrink: 0;
+  height: 100%;
+  /* 无右边框，与顶部融合 */
 }
 
-.welcome-card h2 {
-  margin: 0 0 8px 0;
-  color: #333;
+.dashboard-chat-wrap {
+  flex: 1;
+  min-width: 0;
+  padding: var(--space-md);
+  overflow: hidden;
+  background: var(--bg-subtle);
 }
 
-.welcome-card p {
-  color: #888;
-  margin: 0;
+/* 聊天容器：白色圆角卡片，与侧边栏浅灰背景区分 */
+.dashboard-chat-wrap > .chat-container {
+  height: 100%;
+  background: var(--bg-surface);
+  border-radius: 16px;
+  border: 1px solid var(--border-default);
+  overflow: hidden;
 }
 
-.placeholder-card {
-  background: white;
-  padding: 48px;
-  border-radius: 12px;
-  text-align: center;
-  color: #aaa;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+/* 移动端侧边栏遮罩（默认隐藏） */
+.dashboard-sidebar-overlay {
+  display: none;
 }
 
-.placeholder-card p {
-  margin: 8px 0;
-}
-
-.placeholder-card .hint {
-  font-size: 13px;
-  color: #ccc;
-}
-
+/* 加载容器（保留以兼容未登录状态） */
 .loading-container {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: var(--text-base);
+  gap: 12px;
 }
 
 .spinner {
-  width: 40px;
-  height: 40px;
-  border: 4px solid #e8ecf1;
-  border-top: 4px solid #667eea;
+  width: 32px;
+  height: 32px;
+  border: 2px solid var(--bg-muted);
+  border-top: 2px solid var(--accent);
   border-radius: 50%;
-  animation: spin 0.8s linear infinite;
+  animation: spin 0.7s linear infinite;
 }
 
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* 响应式：移动端侧边栏作为浮层弹出 */
+@media (max-width: 768px) {
+  .dashboard-main {
+    flex-direction: column;
+  }
+
+  .dashboard-sidebar {
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    z-index: 1000;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+    background: var(--bg-subtle);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .dashboard-sidebar-open {
+    transform: translateX(0);
+  }
+
+  .dashboard-sidebar-overlay {
+    display: block;
+    position: fixed;
+    top: 56px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.3);
+    z-index: 999;
+  }
+
+  .dashboard-chat-wrap {
+    padding: var(--space-sm);
+  }
+
+  .dashboard-topbar {
+    padding: 0 var(--space-md);
   }
 }
