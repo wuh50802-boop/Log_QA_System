@@ -84,11 +84,17 @@ def _build_pipeline(request: QARequest) -> RobustQAPipeline:
     使用 RobustQAPipeline 包装 QAPipeline，接管异常处理：
     - LLM 超时/Qdrant 故障时自动重试
     - 异常时返回友好错误提示而非 500，返回类型仍为 QAResult
+
+    RAG 路径默认采用偏 BM25 权重（v=1.0/b=2.0），与 OPT2 实验最优配置一致：
+    - 消融实验 A4/OPT 证明偏 BM25 在日志检索场景下 ctx_prec/ans_rel 更优
+    - 关键词匹配（错误码、服务名、级别）对精确检索更重要
     """
     return create_robust_pipeline(
         top_k=request.top_k or 5,
         template_type=request.template_type or "evidence_chain",
         retriever_type=request.retriever_type or "hybrid",
+        vector_weight=1.0,
+        bm25_weight=2.0,
     )
 
 
@@ -181,14 +187,23 @@ def ask(
     # 2. 构建流水线并执行问答（传入历史以支持多轮上下文）
     # RobustQAPipeline 内部已接管异常处理：LLM 超时/检索故障时自动重试，
     # 重试仍失败则返回带友好提示的 QAResult（confidence="低"），不会抛出异常
-    pipeline = _build_pipeline(request)
-    result = pipeline.ask(
-        question=request.question,
-        filters=request.filters,
-        top_k=request.top_k,
-        template_type=request.template_type,
-        history=history,
-    )
+    #
+    # 路由判断：聚合/统计类问题走 NL2SQL 路径（直接查 logs 表），
+    # 其他问题走 RAG 检索路径（向量/BM25/hybrid + LLM 生成）
+    from services.nl2sql import detect_intent, ask as nl2sql_ask
+
+    if detect_intent(request.question) == "nl2sql":
+        logger.info(f"路由到 NL2SQL 路径: {request.question[:50]}...")
+        result = nl2sql_ask(request.question)
+    else:
+        pipeline = _build_pipeline(request)
+        result = pipeline.ask(
+            question=request.question,
+            filters=request.filters,
+            top_k=request.top_k,
+            template_type=request.template_type,
+            history=history,
+        )
 
     # 3. 转换来源引用为响应 Schema
     source_refs = [
@@ -332,13 +347,35 @@ def ask_stream(
 
     def event_generator():
         start_time = time.time()
-        pipeline = _build_pipeline(request)
         full_answer = ""
         sources_data = []
         source_refs_data = []
         retriever_type = request.retriever_type or "hybrid"
 
-        try:
+        # 路由判断：聚合类走 NL2SQL（一次性返回，不走流式 LLM）
+        from services.nl2sql import detect_intent, ask as nl2sql_ask
+
+        if detect_intent(request.question) == "nl2sql":
+            logger.info(f"路由到 NL2SQL 路径（流式）: {request.question[:50]}...")
+            try:
+                result = nl2sql_ask(request.question)
+                full_answer = result.answer
+                retriever_type = "nl2sql"
+                # source 事件（NL2SQL 无 sources）
+                yield _sse_event("source", {
+                    "message": "NL2SQL 路径：直接查询 logs 表",
+                    "sources": [],
+                    "retriever_type": "nl2sql",
+                    "sources_count": 0,
+                })
+                # answer 事件（一次性输出完整答案）
+                yield _sse_event("answer", {"content": result.answer})
+            except Exception as e:
+                logger.error(f"NL2SQL 失败: {e}")
+                full_answer = f"NL2SQL 查询失败: {e}"
+                yield _sse_event("error", {"message": str(e)})
+        else:
+            pipeline = _build_pipeline(request)
             for chunk in pipeline.ask_stream(
                 question=request.question,
                 filters=request.filters,
@@ -369,92 +406,84 @@ def ask_stream(
                     full_answer += chunk.content
                     yield _sse_event("answer", {"content": chunk.content})
 
-            # 流正常结束，发送 done 事件
-            total_time = round(time.time() - start_time, 3)
+        # 流正常结束，发送 done 事件（NL2SQL 与 RAG 路径共用）
+        total_time = round(time.time() - start_time, 3)
 
-            # 质量自检（流式结束后对完整回答执行）
-            quality_check_data = _run_quality_check(
+        # 质量自检（流式结束后对完整回答执行）
+        quality_check_data = _run_quality_check(
+            answer=full_answer,
+            sources=source_refs_data,
+            confidence="中",
+        )
+
+        # 持久化问答历史（带 conversation_id + quality_check）
+        qa_id = None
+        try:
+            history_record = QAHistory(
+                user_id=current_user.id,
+                question=request.question,
                 answer=full_answer,
-                sources=source_refs_data,
-                confidence="中",
+                sources=json.dumps(source_refs_data, ensure_ascii=False)
+                if source_refs_data
+                else None,
+                feedback=FeedbackType.NONE,
+                conversation_id=conversation_id,
+                quality_check=(
+                    quality_check_data.model_dump_json()
+                    if quality_check_data
+                    else None
+                ),
             )
-
-            # 持久化问答历史（带 conversation_id + quality_check）
-            qa_id = None
-            try:
-                history_record = QAHistory(
-                    user_id=current_user.id,
-                    question=request.question,
-                    answer=full_answer,
-                    sources=json.dumps(source_refs_data, ensure_ascii=False)
-                    if source_refs_data
-                    else None,
-                    feedback=FeedbackType.NONE,
-                    conversation_id=conversation_id,
-                    quality_check=(
-                        quality_check_data.model_dump_json()
-                        if quality_check_data
-                        else None
-                    ),
-                )
-                db.add(history_record)
-                db.commit()
-                db.refresh(history_record)
-                qa_id = history_record.id
-            except Exception as e:
-                logger.warning(f"保存流式问答历史失败: {e}")
-                db.rollback()
-
-            quality_check_payload = (
-                quality_check_data.model_dump() if quality_check_data else None
-            )
-
-            # 审计日志
-            try:
-                log_audit(
-                    db=db,
-                    user_id=current_user.id,
-                    username=current_user.username,
-                    action="ask_stream",
-                    resource="qa",
-                    details={
-                        "question": request.question[:200],
-                        "retriever_type": retriever_type,
-                        "sources_count": len(source_refs_data),
-                        "qa_id": qa_id,
-                        "conversation_id": conversation_id,
-                        "history_turns": len(history) // 2,
-                        "total_time": total_time,
-                        "answer_length": len(full_answer),
-                        "quality_score": (
-                            quality_check_data.score if quality_check_data else None
-                        ),
-                        "quality_passed": (
-                            quality_check_data.passed if quality_check_data else None
-                        ),
-                    },
-                )
-            except Exception as e:
-                logger.warning(f"记录流式审计日志失败: {e}")
-
-            yield _sse_event("done", {
-                "success": True,
-                "answer_length": len(full_answer),
-                "sources": source_refs_data,
-                "retriever_type": retriever_type,
-                "total_time": total_time,
-                "qa_id": qa_id,
-                "conversation_id": conversation_id,
-                "quality_check": quality_check_payload,
-            })
-
+            db.add(history_record)
+            db.commit()
+            db.refresh(history_record)
+            qa_id = history_record.id
         except Exception as e:
-            logger.error(f"流式问答异常: {e}", exc_info=True)
-            total_time = round(time.time() - start_time, 3)
-            yield _sse_event("error", {
-                "message": f"流式问答异常: {str(e)}",
-                "total_time": total_time,
-            })
+            logger.warning(f"保存流式问答历史失败: {e}")
+            db.rollback()
+
+        quality_check_payload = (
+            quality_check_data.model_dump() if quality_check_data else None
+        )
+
+        # 审计日志
+        try:
+            log_audit(
+                db=db,
+                user_id=current_user.id,
+                username=current_user.username,
+                action="ask_stream",
+                resource="qa",
+                details={
+                    "question": request.question[:200],
+                    "retriever_type": retriever_type,
+                    "sources_count": len(source_refs_data),
+                    "qa_id": qa_id,
+                    "conversation_id": conversation_id,
+                    "history_turns": len(history) // 2,
+                    "total_time": total_time,
+                    "answer_length": len(full_answer),
+                    "quality_score": (
+                        quality_check_data.score if quality_check_data else None
+                    ),
+                    "quality_passed": (
+                        quality_check_data.passed if quality_check_data else None
+                    ),
+                },
+            )
+        except Exception as e:
+            logger.warning(f"记录流式审计日志失败: {e}")
+
+        yield _sse_event("done", {
+            "success": True,
+            "answer_length": len(full_answer),
+            "sources": source_refs_data,
+            "retriever_type": retriever_type,
+            "total_time": total_time,
+            "qa_id": qa_id,
+            "conversation_id": conversation_id,
+            "quality_check": quality_check_payload,
+        })
 
     return StreamingResponse(
         event_generator(),

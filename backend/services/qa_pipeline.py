@@ -108,38 +108,73 @@ class QAPipeline:
         top_k: int = 5,
         template_type: str = "evidence_chain",
         retriever_type: str = "hybrid",
-        max_log_length: int = 300
+        max_log_length: int = 300,
+        rerank: bool = False,
+        rerank_model: Optional[str] = None,
+        rerank_candidate_k: int = 20,
+        vector_weight: float = 1.0,
+        bm25_weight: float = 1.0,
     ):
         """
         初始化问答流水线
 
         Args:
-            top_k: 检索返回的日志数量
+            top_k: 检索返回的日志数量（最终送入 LLM 的数量）
             template_type: Prompt 模板类型 (evidence_chain, quick, analysis)
             retriever_type: 检索器类型 (vector, bm25, hybrid)
             max_log_length: 每条日志的最大长度
+            rerank: 是否启用 Cross-Encoder 重排序
+            rerank_model: 重排序模型名称（None 用默认）
+            rerank_candidate_k: 启用重排序时，先检索 Top-N 候选再重排到 top_k
+            vector_weight: 混合检索中向量权重
+            bm25_weight: 混合检索中 BM25 权重
         """
         self.top_k = top_k
         self.template_type = template_type
         self.retriever_type = retriever_type
         self.max_log_length = max_log_length
-        
-        # 初始化检索器
+        self.rerank = rerank
+        self.rerank_candidate_k = rerank_candidate_k
+        self.vector_weight = vector_weight
+        self.bm25_weight = bm25_weight
+
+        # 初始化检索器（注入权重）
         self._init_retriever(retriever_type)
-        
+
+        # 初始化重排序器（按需，复用全局单例避免重复加载 1.1GB 模型）
+        self.reranker = None
+        if rerank:
+            from .reranker import get_reranker
+            self.reranker = get_reranker()
+            logger.info(f"已启用 Cross-Encoder 重排序: candidate_k={rerank_candidate_k} -> top_k={top_k}")
+
         self.llm_client = DeepSeekClient()
         self.conversation_history: List[Dict[str, str]] = []
 
     def _init_retriever(self, retriever_type: str):
         """初始化检索器"""
+        # 启用重排序时，检索阶段取更多候选
+        effective_top_k = self.rerank_candidate_k if self.rerank else self.top_k
+
         if retriever_type == "vector":
-            self.retriever = LogRetriever(top_k=self.top_k)
+            self.retriever = LogRetriever(top_k=effective_top_k)
             self._search_method = self._search_vector
         elif retriever_type == "bm25":
             self.retriever = get_bm25_retriever()
             self._search_method = self._search_bm25
         else:  # hybrid
-            self.retriever = get_hybrid_retriever_async(top_k=self.top_k)
+            # 默认权重走单例（复用已初始化的检索器，省开销）
+            # 非默认权重直接 new 实例（消融实验需要切换权重）
+            if self.vector_weight == 1.0 and self.bm25_weight == 1.0:
+                self.retriever = get_hybrid_retriever_async(top_k=effective_top_k)
+            else:
+                from .hybrid_retriever import HybridRetrieverAsync
+                self.retriever = HybridRetrieverAsync(
+                    top_k=effective_top_k,
+                    vector_weight=self.vector_weight,
+                    bm25_weight=self.bm25_weight,
+                )
+                logger.info(f"使用自定义权重 hybrid: vector_w={self.vector_weight}, bm25_w={self.bm25_weight}")
             self._search_method = self._search_hybrid
 
     def _search_vector(
@@ -239,31 +274,64 @@ class QAPipeline:
 
     def _extract_source_refs(self, answer: str, sources: List[Dict[str, Any]]) -> List[SourceReference]:
         """
-        从回答中提取来源引用，并匹配到具体的日志
+        从回答中提取来源引用，并匹配到具体的日志。
+        支持三种引用形式：
+          - [ID:xxx]  规范格式（优先）
+          - [xxx]     裸 log_id 形式（LLM 常见输出）
+          - [n]       序号形式（1-based，对应 sources 顺序）
         """
         source_refs = []
-        
-        # 查找所有 [ID:xxx] 格式的引用
-        pattern = r'\[ID:(\d+)\]'
-        matches = re.findall(pattern, answer)
-        
-        # 去重
-        unique_log_ids = list(set(int(m) for m in matches))
-        
+
+        # 收集所有合法 log_id 与序号映射
+        valid_log_ids = {s.get('log_id') for s in sources if s.get('log_id') is not None}
+        serial_to_log_id = {idx: s.get('log_id') for idx, s in enumerate(sources, 1)
+                            if s.get('log_id') is not None}
+
+        # 第一步：提取 [ID:xxx]
+        id_pattern = r'\[ID:(\d+)\]'
+        id_matches = re.findall(id_pattern, answer)
+        referenced_log_ids = set(int(m) for m in id_matches)
+
+        # 第二步：提取 [数字]（排除已被 [ID:数字] 匹配的部分）
+        # 用负向先行断言避免重复匹配 [ID:数字] 中的数字
+        bare_pattern = r'(?<!ID:)\[(\d+)\]'
+        bare_matches = re.findall(bare_pattern, answer)
+        for m in bare_matches:
+            num = int(m)
+            if num in valid_log_ids:
+                referenced_log_ids.add(num)
+            elif num in serial_to_log_id:
+                referenced_log_ids.add(serial_to_log_id[num])
+
+        # 按回答中出现顺序排序（保持引用顺序稳定）
+        # 重新扫描一次以获取出现顺序
+        ordered_ids = []
+        seen = set()
+        for m in re.finditer(r'\[ID:(\d+)\]|(?<!ID:)\[(\d+)\]', answer):
+            num = int(m.group(1) or m.group(2))
+            target = num if num in valid_log_ids else serial_to_log_id.get(num)
+            if target is not None and target not in seen:
+                ordered_ids.append(target)
+                seen.add(target)
+        # 兜底：若有未在回答中按顺序出现的，补到末尾
+        for lid in referenced_log_ids:
+            if lid not in seen:
+                ordered_ids.append(lid)
+                seen.add(lid)
+
         # 为每个引用的日志创建 SourceReference
         ref_counter = 0
-        for log_id in unique_log_ids:
-            # 查找对应的日志
+        for log_id in ordered_ids:
             log_data = None
             for source in sources:
                 if source.get('log_id') == log_id:
                     log_data = source
                     break
-            
+
             if log_data:
                 ref_counter += 1
                 ref_id = f"[{ref_counter}]"
-                
+
                 content = log_data.get('content', '')
                 source_refs.append(SourceReference(
                     ref_id=ref_id,
@@ -275,8 +343,8 @@ class QAPipeline:
                     score=log_data.get('score', 0.0),
                     snippet=content[:100] + "..." if len(content) > 100 else content
                 ))
-        
-        # 如果没有 [ID:xxx] 格式的引用，但 sources 不为空，自动添加引用
+
+        # 如果没有任何引用，但 sources 不为空，自动添加引用（保留兜底）
         if not source_refs and sources:
             for idx, source in enumerate(sources[:5], 1):
                 log_id = source.get('log_id')
@@ -292,26 +360,44 @@ class QAPipeline:
                         score=source.get('score', 0.0),
                         snippet=content[:100] + "..." if len(content) > 100 else content
                     ))
-        
+
         return source_refs
 
     def _annotate_answer_with_refs(self, answer: str, source_refs: List[SourceReference]) -> str:
         """
-        将回答中的 [ID:xxx] 替换为 [n] 格式
+        规范化回答中的引用格式：统一为 [ID:log_id] 形式。
+        - LLM 正确输出 [ID:1646] -> 保留
+        - LLM 输出 [1646] (裸 log_id) -> 修复为 [ID:1646]
+        - LLM 输出 [1] / [2] (序号) -> 映射到对应的 [ID:log_id]
         """
         if not source_refs:
             return answer
-        
-        # 创建 log_id -> ref_id 映射
-        log_to_ref = {ref.log_id: ref.ref_id for ref in source_refs}
-        
-        # 替换 [ID:xxx] 为 [n]
-        def replace_ref(match):
-            log_id = int(match.group(1))
-            return log_to_ref.get(log_id, match.group(0))
-        
-        annotated = re.sub(r'\[ID:(\d+)\]', replace_ref, answer)
-        
+
+        # 收集所有合法的 log_id（用于识别 [数字] 是否为裸 log_id）
+        valid_log_ids = {ref.log_id for ref in source_refs}
+        # 序号 -> log_id 映射（按 source_refs 顺序，1-based）
+        serial_to_log_id = {idx: ref.log_id for idx, ref in enumerate(source_refs, 1)}
+
+        # 第一步：把 [数字] 形式统一修复为 [ID:数字] 或 [ID:对应log_id]
+        def replace_bracket_num(match):
+            num_str = match.group(1)
+            try:
+                num = int(num_str)
+            except ValueError:
+                return match.group(0)
+            # 情况 A：是合法 log_id（裸 log_id 形式）-> 补全为 [ID:num]
+            if num in valid_log_ids:
+                return f"[ID:{num}]"
+            # 情况 B：是 1-N 序号 -> 映射到对应 log_id
+            if num in serial_to_log_id:
+                return f"[ID:{serial_to_log_id[num]}]"
+            # 都不是，保持原样
+            return match.group(0)
+
+        # 仅替换 [数字]，不动已有的 [ID:数字]
+        # 用负向先行断言确保不是 [ID:数字] 的一部分
+        annotated = re.sub(r'(?<!ID:)\[(\d+)\]', replace_bracket_num, answer)
+
         return annotated
 
     def ask(
@@ -339,10 +425,20 @@ class QAPipeline:
         # 1. 检索
         retrieval_start = time.time()
         k = top_k or self.top_k
-        logs = self._search_method(question, k, filters)
+        # 启用重排序时，先取 rerank_candidate_k 条候选，再重排到 k 条
+        retrieve_k = self.rerank_candidate_k if self.rerank else k
+        logs = self._search_method(question, retrieve_k, filters)
         retrieval_time = time.time() - retrieval_start
 
         logger.info(f"[{self.retriever_type}] 检索到 {len(logs)} 条相关日志，耗时 {retrieval_time:.3f}s")
+
+        # 1.5 重排序（若启用）
+        rerank_time = 0.0
+        if self.rerank and self.reranker and logs:
+            rerank_start = time.time()
+            logs = self.reranker.rerank(question, logs, top_k=k)
+            rerank_time = time.time() - rerank_start
+            logger.info(f"[rerank] 重排序到 {len(logs)} 条，耗时 {rerank_time:.3f}s")
 
         # 截断过长的日志
         for log in logs:
@@ -436,9 +532,16 @@ class QAPipeline:
         """
         # 1. 检索相关日志
         k = top_k or self.top_k
-        logs = self._search_method(question, k, filters)
+        # 启用重排序时，先取 rerank_candidate_k 条候选，再重排到 k 条
+        retrieve_k = self.rerank_candidate_k if self.rerank else k
+        logs = self._search_method(question, retrieve_k, filters)
 
         logger.info(f"[{self.retriever_type}] 检索到 {len(logs)} 条相关日志")
+
+        # 1.5 重排序（若启用）
+        if self.rerank and self.reranker and logs:
+            logs = self.reranker.rerank(question, logs, top_k=k)
+            logger.info(f"[rerank] 重排序到 {len(logs)} 条")
 
         # 截断过长的日志
         for log in logs:
@@ -752,16 +855,26 @@ def create_pipeline(
     top_k: int = 5,
     template_type: str = "evidence_chain",
     retriever_type: str = "hybrid",
-    max_log_length: int = 300
+    max_log_length: int = 300,
+    rerank: bool = False,
+    rerank_model: Optional[str] = None,
+    rerank_candidate_k: int = 20,
+    vector_weight: float = 1.0,
+    bm25_weight: float = 1.0,
 ) -> QAPipeline:
     """
     创建问答流水线实例
 
     Args:
-        top_k: 检索返回的日志数量
+        top_k: 检索返回的日志数量（最终送入 LLM 的数量）
         template_type: Prompt 模板类型 (evidence_chain, quick, short)
         retriever_type: 检索器类型 (vector, bm25, hybrid)
         max_log_length: 每条日志的最大长度
+        rerank: 是否启用 Cross-Encoder 重排序
+        rerank_model: 重排序模型名称
+        rerank_candidate_k: 重排序候选数（先检索 Top-N 再重排到 top_k）
+        vector_weight: 混合检索向量权重
+        bm25_weight: 混合检索 BM25 权重
 
     Returns:
         QAPipeline: 问答流水线实例
@@ -770,5 +883,10 @@ def create_pipeline(
         top_k=top_k,
         template_type=template_type,
         retriever_type=retriever_type,
-        max_log_length=max_log_length
+        max_log_length=max_log_length,
+        rerank=rerank,
+        rerank_model=rerank_model,
+        rerank_candidate_k=rerank_candidate_k,
+        vector_weight=vector_weight,
+        bm25_weight=bm25_weight,
     )

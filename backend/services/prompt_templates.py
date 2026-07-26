@@ -13,7 +13,13 @@ class PromptTemplates:
     # 系统提示词（精简）
     # ============================================================
 
-    SYSTEM_PROMPT = """你是日志分析助手。基于提供的日志证据回答问题，禁止编造。引用格式：[ID:xxx]"""
+    SYSTEM_PROMPT = """你是日志分析助手。基于提供的日志证据回答问题，禁止编造。
+
+引用规则（必须严格遵守）：
+1. 引用日志时只能使用 [ID:日志ID] 格式，例如 [ID:1646]
+2. 禁止使用 [数字] 形式（如 [1]、[3]），必须使用 [ID:数字] 完整形式
+3. 引用的 ID 必须来自上方"日志:"列表中给出的 [ID:xxx]
+4. 不引用列表外的日志"""
 
     # ============================================================
     # 证据链约束 Prompt（自然语言版）
@@ -28,7 +34,7 @@ class PromptTemplates:
         """
         精简版证据链 Prompt - 自然语言输出
         """
-        # 紧凑的日志格式 - 一行一条
+        # 紧凑的日志格式 - 一行一条，使用 [ID:xxx] 规范格式示范
         logs_text = []
         for idx, log in enumerate(context, 1):
             log_id = log.get('log_id', log.get('id', f'#{idx}'))
@@ -39,8 +45,8 @@ class PromptTemplates:
             # 移除换行，压缩空格
             content = ' '.join(content.split())
             
-            # 格式: [ID] 服务/级别 时间: 内容
-            logs_text.append(f"{idx}.[{log_id}] {service}/{level} {timestamp}: {content}")
+            # 格式: [ID:xxx] 服务/级别 时间: 内容 （明确示范引用格式）
+            logs_text.append(f"[ID:{log_id}] {service}/{level} {timestamp}: {content}")
         
         context_text = "\n".join(logs_text)
 
@@ -62,7 +68,7 @@ class PromptTemplates:
 
 请按以下格式回答（使用自然语言，不要用管道符分隔）：
 【问题理解】简要复述用户的问题
-【关键证据】列出相关的日志条目，必须带引用如[ID:xxx]
+【关键证据】列出相关的日志条目，必须带引用如 [ID:1646]（注意必须使用 [ID:数字] 完整格式，不要写成 [1646] 或 [1]）
 【分析推断】基于证据进行分析
 【结论建议】给出明确的结论或操作建议
 【置信度】高/中/低
@@ -81,21 +87,21 @@ class PromptTemplates:
         """
         快速问答 Prompt - 最短模式，适用于简单问题
         """
-        # 超紧凑格式
+        # 超紧凑格式，使用 [ID:xxx] 规范格式
         logs_text = []
         for idx, log in enumerate(context, 1):
             log_id = log.get('log_id', f'#{idx}')
             content = ' '.join(log.get('content', '').split())[:150]
-            logs_text.append(f"{idx}.[{log_id}] {content}")
-        
+            logs_text.append(f"[ID:{log_id}] {content}")
+
         context_text = "\n".join(logs_text)
-        
+
         return f"""日志:
 {context_text}
 
 Q: {question}
 
-简短回答（带引用如[ID:xxx]）:
+简短回答（必须使用 [ID:数字] 完整格式引用，例如 [ID:1646]）:
 A:"""
 
     # ============================================================
@@ -116,11 +122,11 @@ A:"""
             service = log.get('service', 'unknown')
             level = log.get('level', 'INFO')
             content = ' '.join(log.get('content', '').split())[:200]
-            logs_text.append(f"{idx}.[{log_id}] {service}|{level}: {content}")
-        
+            logs_text.append(f"[ID:{log_id}] {service}|{level}: {content}")
+
         context_text = "\n".join(logs_text)
-        
-        return f"""基于日志回答问题，引用来源如[ID:xxx]。
+
+        return f"""基于日志回答问题，引用来源必须使用 [ID:数字] 完整格式（例如 [ID:1646]），不要写成 [1646] 或 [1]。
 
 {context_text}
 
@@ -128,7 +134,7 @@ Q: {question}
 
 格式：
 【问题理解】
-【关键证据】（带引用）
+【关键证据】（带 [ID:数字] 引用）
 【分析推断】
 【结论建议】
 
@@ -151,8 +157,8 @@ Q: {question}
             timestamp = log.get('timestamp', log.get('time', 'unknown'))
             level = log.get('level', 'INFO')
             content = ' '.join(log.get('content', log.get('message', log.get('chunk_text', ''))).split())
-            
-            lines.append(f"{idx}.[{log_id}] {service}/{level} {timestamp}: {content}")
+
+            lines.append(f"[ID:{log_id}] {service}/{level} {timestamp}: {content}")
 
         return "\n".join(lines)
 

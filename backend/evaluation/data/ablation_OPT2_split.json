@@ -1,0 +1,178 @@
+{
+  "generated_at": "2026-07-26T21:35:09.756345",
+  "total_n": 60,
+  "rag_path": {
+    "overall": {
+      "n": 44,
+      "faithfulness": 0.6520589695428549,
+      "answer_relevancy": 0.6702423465923455,
+      "context_precision": 0.4377209595812371,
+      "context_recall": 0.1590909090909091
+    },
+    "by_scenario": [
+      {
+        "scenario": "error_diagnosis",
+        "n": 9,
+        "faithfulness": 0.6771879111791392,
+        "answer_relevancy": 0.7850093776018189,
+        "context_precision": 0.7777777777622222,
+        "context_recall": 0.2777777777777778
+      },
+      {
+        "scenario": "performance",
+        "n": 9,
+        "faithfulness": 0.6268617548029313,
+        "answer_relevancy": 0.6626071405102172,
+        "context_precision": 0.32777777777069445,
+        "context_recall": 0.1111111111111111
+      },
+      {
+        "scenario": "resource",
+        "n": 5,
+        "faithfulness": 0.6297619047619047,
+        "answer_relevancy": 0.6242646322916192,
+        "context_precision": 0.24999999997916666,
+        "context_recall": 0.0
+      },
+      {
+        "scenario": "security",
+        "n": 6,
+        "faithfulness": 0.584376764539808,
+        "answer_relevancy": 0.6574284547498652,
+        "context_precision": 0.47777777775972224,
+        "context_recall": 0.08333333333333333
+      },
+      {
+        "scenario": "service_health",
+        "n": 7,
+        "faithfulness": 0.7516917293233083,
+        "answer_relevancy": 0.6502961944414836,
+        "context_precision": 0.6505952380652034,
+        "context_recall": 0.33333333333333337
+      },
+      {
+        "scenario": "time_analysis",
+        "n": 2,
+        "faithfulness": 0.5809523809523809,
+        "answer_relevancy": 0.3746028821221808,
+        "context_precision": 0.0,
+        "context_recall": 0.0
+      },
+      {
+        "scenario": "user_activity",
+        "n": 6,
+        "faithfulness": 0.6458884479717814,
+        "answer_relevancy": 0.6824902619604737,
+        "context_precision": 0.10648148147793209,
+        "context_recall": 0.1111111111111111
+      }
+    ],
+    "by_difficulty": [
+      {
+        "difficulty": "easy",
+        "n": 24,
+        "faithfulness": 0.6756197993040098,
+        "answer_relevancy": 0.7645651330132875,
+        "context_precision": 0.6390624999826114,
+        "context_recall": 0.2777777777777778
+      },
+      {
+        "difficulty": "hard",
+        "n": 5,
+        "faithfulness": 0.5913826641767818,
+        "answer_relevancy": 0.49532351831550103,
+        "context_precision": 0.07333333332966667,
+        "context_recall": 0.0
+      },
+      {
+        "difficulty": "medium",
+        "n": 15,
+        "faithfulness": 0.6345870770470313,
+        "answer_relevancy": 0.5776321644111196,
+        "context_precision": 0.23703703702289505,
+        "context_recall": 0.02222222222222222
+      }
+    ],
+    "perf": {
+      "total_time": 3.7687573487108406,
+      "retrieval_time": 0.43814581632614136,
+      "llm_time": 3.3300389484925703,
+      "tokens": 745.2045454545455
+    }
+  },
+  "nl2sql_path": {
+    "overall": {
+      "n": 16,
+      "sql_success": 16,
+      "sql_fail": 0,
+      "sql_success_rate": 1.0,
+      "result_nonEmpty": 16,
+      "result_nonEmpty_rate": 1.0,
+      "answer_relevancy": 0.7081377434087742
+    },
+    "by_scenario": [
+      {
+        "scenario": "aggregation",
+        "n": 5,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.7356726633124764
+      },
+      {
+        "scenario": "error_diagnosis",
+        "n": 3,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.7055521023494599
+      },
+      {
+        "scenario": "performance",
+        "n": 1,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.6455655114262298
+      },
+      {
+        "scenario": "resource",
+        "n": 1,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.7222787427125691
+      },
+      {
+        "scenario": "security",
+        "n": 2,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.712930475444491
+      },
+      {
+        "scenario": "service_health",
+        "n": 1,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.7222139258385049
+      },
+      {
+        "scenario": "time_analysis",
+        "n": 1,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.4950206029049618
+      },
+      {
+        "scenario": "user_activity",
+        "n": 2,
+        "sql_success_rate": 1.0,
+        "result_nonEmpty_rate": 1.0,
+        "answer_relevancy": 0.7621222685791892
+      }
+    ],
+    "failures": [],
+    "perf": {
+      "total_time": 2.198125,
+      "llm_time": 2.18875,
+      "tokens": 703.1875
+    }
+  }
+}

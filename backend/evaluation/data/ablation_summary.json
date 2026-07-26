@@ -1,0 +1,156 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-07-26 20:44:24",
+  "groups": {
+    "A0": {
+      "name": "基线（hybrid 等权）",
+      "config": {
+        "name": "基线（hybrid 等权）",
+        "retriever_type": "hybrid",
+        "vector_weight": 1.0,
+        "bm25_weight": 1.0,
+        "rerank": false,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.7059,
+        "answer_relevancy": 0.6573,
+        "context_precision": 0.3615,
+        "context_recall": 0.1333
+      },
+      "performance": {
+        "total_time_sec": 141.4,
+        "avg_per_item_sec": 9.43,
+        "avg_retrieval_time_sec": 7.087,
+        "avg_llm_time_sec": 3.606,
+        "avg_total_tokens": 765
+      },
+      "total_items": 15
+    },
+    "A1": {
+      "name": "纯向量",
+      "config": {
+        "name": "纯向量",
+        "retriever_type": "vector",
+        "vector_weight": 1.0,
+        "bm25_weight": 1.0,
+        "rerank": false,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.6597,
+        "answer_relevancy": 0.6608,
+        "context_precision": 0.2022,
+        "context_recall": 0.1222
+      },
+      "performance": {
+        "total_time_sec": 130.3,
+        "avg_per_item_sec": 8.69,
+        "avg_retrieval_time_sec": 0.411,
+        "avg_llm_time_sec": 4.005,
+        "avg_total_tokens": 756
+      },
+      "total_items": 15
+    },
+    "A2": {
+      "name": "纯 BM25",
+      "config": {
+        "name": "纯 BM25",
+        "retriever_type": "bm25",
+        "vector_weight": 1.0,
+        "bm25_weight": 1.0,
+        "rerank": false,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.693,
+        "answer_relevancy": 0.6626,
+        "context_precision": 0.3781,
+        "context_recall": 0.1333
+      },
+      "performance": {
+        "total_time_sec": 110.9,
+        "avg_per_item_sec": 7.39,
+        "avg_retrieval_time_sec": 0.025,
+        "avg_llm_time_sec": 3.701,
+        "avg_total_tokens": 760
+      },
+      "total_items": 15
+    },
+    "A3": {
+      "name": "混合-偏向量",
+      "config": {
+        "name": "混合-偏向量",
+        "retriever_type": "hybrid",
+        "vector_weight": 2.0,
+        "bm25_weight": 1.0,
+        "rerank": false,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.6821,
+        "answer_relevancy": 0.6486,
+        "context_precision": 0.3689,
+        "context_recall": 0.2
+      },
+      "performance": {
+        "total_time_sec": 99.8,
+        "avg_per_item_sec": 6.65,
+        "avg_retrieval_time_sec": 0.305,
+        "avg_llm_time_sec": 3.685,
+        "avg_total_tokens": 755
+      },
+      "total_items": 15
+    },
+    "A4": {
+      "name": "混合-偏 BM25",
+      "config": {
+        "name": "混合-偏 BM25",
+        "retriever_type": "hybrid",
+        "vector_weight": 1.0,
+        "bm25_weight": 2.0,
+        "rerank": false,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.6839,
+        "answer_relevancy": 0.7086,
+        "context_precision": 0.3267,
+        "context_recall": 0.1556
+      },
+      "performance": {
+        "total_time_sec": 92.4,
+        "avg_per_item_sec": 6.16,
+        "avg_retrieval_time_sec": 0.195,
+        "avg_llm_time_sec": 3.497,
+        "avg_total_tokens": 759
+      },
+      "total_items": 15
+    },
+    "A5": {
+      "name": "混合 + 重排序",
+      "config": {
+        "name": "混合 + 重排序",
+        "retriever_type": "hybrid",
+        "vector_weight": 1.0,
+        "bm25_weight": 1.0,
+        "rerank": true,
+        "rerank_candidate_k": 20
+      },
+      "metrics": {
+        "faithfulness": 0.6988,
+        "answer_relevancy": 0.6484,
+        "context_precision": 0.3356,
+        "context_recall": 0.1333
+      },
+      "performance": {
+        "total_time_sec": 198.9,
+        "avg_per_item_sec": 13.26,
+        "avg_retrieval_time_sec": 0.351,
+        "avg_llm_time_sec": 3.954,
+        "avg_total_tokens": 768
+      },
+      "total_items": 15
+    }
+  }
+}

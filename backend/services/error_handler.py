@@ -384,17 +384,38 @@ def create_robust_pipeline(
     top_k: int = 5,
     retriever_type: str = "hybrid",
     template_type: str = "evidence_chain",
-    timeout: float = 30.0
+    timeout: float = 30.0,
+    rerank: bool = False,
+    rerank_model: Optional[str] = None,
+    rerank_candidate_k: int = 20,
+    vector_weight: float = 1.0,
+    bm25_weight: float = 1.0,
 ) -> RobustQAPipeline:
     """
     创建健壮的问答流水线
+
+    Args:
+        top_k: 检索返回的日志数量
+        retriever_type: 检索器类型 (vector, bm25, hybrid)
+        template_type: Prompt 模板类型
+        timeout: 超时时间
+        rerank: 是否启用 Cross-Encoder 重排序
+        rerank_model: 重排序模型名称
+        rerank_candidate_k: 重排序候选数
+        vector_weight: 混合检索向量权重
+        bm25_weight: 混合检索 BM25 权重
     """
     from .qa_pipeline import create_pipeline
-    
+
     pipeline = create_pipeline(
         top_k=top_k,
         template_type=template_type,
-        retriever_type=retriever_type
+        retriever_type=retriever_type,
+        rerank=rerank,
+        rerank_model=rerank_model,
+        rerank_candidate_k=rerank_candidate_k,
+        vector_weight=vector_weight,
+        bm25_weight=bm25_weight,
     )
-    
+
     return RobustQAPipeline(pipeline)
