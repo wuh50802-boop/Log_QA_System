@@ -1,8 +1,8 @@
-# 日志智能问答系统 · Code Wiki
+  # 日志智能问答系统 · Code Wiki
 
 > 本文档是对 `log-qa-system` 项目仓库的结构化代码百科，涵盖项目整体架构、主要模块职责、关键类与函数说明、依赖关系以及项目运行方式等关键信息。
 >
-> 文档基于代码库静态分析生成，反映截至 2026-07-24 的代码状态。
+> 文档基于代码库静态分析生成，反映截至 2026-07-27 的代码状态。
 
 ---
 
@@ -20,9 +20,10 @@
   - [5.5 API 路由层 api/](#55-api-路由层-api)
   - [5.6 服务层 services/（核心业务逻辑）](#56-服务层-services核心业务逻辑)
   - [5.7 脚本层 scripts/](#57-脚本层-scripts)
-  - [5.8 测试层 tests/](#58-测试层-tests)
-  - [5.9 工具层 utils/](#59-工具层-utils)
-  - [5.10 数据文件 data/](#510-数据文件-data)
+  - [5.8 评估模块 evaluation/](#58-评估模块-evaluation)
+  - [5.9 测试层 tests/](#59-测试层-tests)
+  - [5.10 工具层 utils/](#510-工具层-utils)
+  - [5.11 数据文件 data/](#511-数据文件-data)
 - [6. 前端模块详解](#6-前端模块详解)
 - [7. 核心数据流与处理流程](#7-核心数据流与处理流程)
 - [8. 关键类与函数索引](#8-关键类与函数索引)
@@ -40,12 +41,15 @@
 **项目定位**：基于 LLM（DeepSeek）+ RAG（检索增强生成）的应用运行日志智能问答系统。系统将应用日志经清洗、分块、向量化后存入向量数据库，用户可通过自然语言提问，系统混合检索（向量 + BM25）相关日志，再由 LLM 基于证据生成结构化回答，并提供来源溯源与质量自检能力。
 
 **核心能力**：
-- 用户认证与授权（JWT + RBAC）
+- 用户认证与授权（JWT + RBAC，含管理员用户管理、改密）
 - 日志数据解析、清洗、分块、向量化入库
 - 混合检索（向量语义检索 + BM25 关键词检索 + RRF 融合重排）
-- 基于 DeepSeek LLM 的证据链问答（含流式输出）
-- 多轮对话记忆、来源溯源、回答质量自检、统一异常处理
-- 审计日志记录
+- 聚合统计类问题走 NL2SQL 路径（意图识别 + LLM 生成 SQL + 安全校验 + 只读执行）
+- Cross-Encoder 重排序（bge-reranker-base，可选精排）
+- 基于 DeepSeek LLM 的证据链问答（含 SSE 流式输出）
+- 多轮对话（DB conversation_id 持久化）、来源溯源、回答质量自检、统一异常处理
+- 问答历史、会话管理、点赞/点踩反馈与统计、审计日志记录
+- RAGAS 评估框架与消融实验（backend/evaluation/）
 
 **技术栈速览**：
 
@@ -56,12 +60,14 @@
 | 认证 | JWT（python-jose） + bcrypt（passlib） |
 | 向量数据库 | Qdrant（qdrant-client 1.7） |
 | 嵌入模型 | BAAI/bge-base-zh-v1.5（sentence-transformers + PyTorch CPU） |
+| 重排序模型 | BAAI/bge-reranker-base（CrossEncoder，可选） |
 | 关键词检索 | rank_bm25（BM25Okapi） + jieba 中文分词 + NLTK 词干 |
 | LLM | DeepSeek API（httpx 同步/流式） |
 | 数据处理 | pandas |
+| 评估框架 | RAGAS（backend/evaluation/） |
 | 前端框架 | React 19 + Vite 8 |
 | 前端路由 | react-router-dom 7 |
-| 前端 HTTP | axios |
+| 前端 HTTP | axios（同步） + 原生 fetch（SSE 流式） |
 | 状态管理 | React Context（AuthContext） |
 | 前端 Lint | Oxlint |
 
@@ -84,20 +90,21 @@
 ┌──────────────────────────────────────────────────────────────────────┐
 │                      后端 (FastAPI, main.py)                          │
 │  ┌──────────────┐   ┌────────────────────────────────────────────┐  │
-│  │  api/auth.py  │   │  api/qa.py (占位，问答路由未接入)              │  │
-│  │  注册/登录/me  │   └────────────────────────────────────────────┘  │
-│  └──────┬───────┘                          │                          │
-│         │                                   │                          │
-│         ▼                                   ▼                          │
-│  ┌──────────────┐            ┌──────────────────────────────┐        │
-│  │ core/security│            │    services/qa_pipeline.py    │        │
-│  │  JWT + bcrypt│            │     QAPipeline (编排核心)      │        │
-│  └──────┬───────┘            └──┬─────────┬──────────┬──────┘        │
-│         │                       │         │          │                │
-│         ▼                       ▼         ▼          ▼                │
+│  │  api/auth.py  │   │  api/qa.py (问答路由 + NL2SQL 路由分发)       │  │
+│  │  注册/登录/me  │   │  /ask /ask/stream /history /conversations   │  │
+│  │  用户管理/改密 │   │  /feedback /feedback/stats                 │  │
+│  └──────┬───────┘   └──────────────┬─────────────────────────────┘  │
+│         │                          │ detect_intent 路由              │
+│         ▼                          ▼                                │
+│  ┌──────────────┐      ┌───────────────────────┐ ┌────────────────┐  │
+│  │ core/security│      │ services/qa_pipeline  │ │ services/nl2sql│  │
+│  │  JWT + bcrypt│      │  QAPipeline (RAG 路径) │ │ (聚合统计路径)  │  │
+│  └──────┬───────┘      └──┬─────────┬──────────┘ └───────┬────────┘  │
+│         │                 │         │                   │           │
+│         ▼                 ▼         ▼                   ▼           │
 │  ┌──────────────┐   ┌──────────────┐ ┌──────────┐ ┌──────────────┐  │
-│  │ core/database │   │hybrid_retriev│ │llm_client│ │prompt_templates│ │
-│  │  SQLAlchemy   │   │   RRF 融合    │ │ DeepSeek │ │  证据链模板    │  │
+│  │ core/database │   │hybrid_retriev│ │llm_client│ │ SQLite logs  │  │
+│  │  SQLAlchemy   │   │   RRF 融合    │ │ DeepSeek │ │  (只读查询)   │  │
 │  │  SQLite       │   └──┬───────┬───┘ └──────────┘ └──────────────┘  │
 │  └──────┬───────┘      │       │                                    │
 │         │              ▼       ▼                                    │
@@ -111,6 +118,9 @@
 │                 │ embedder │ │qdrant_   │ │ chunker│              │
 │                 │  BGE-zh  │ │client    │ │  分块   │              │
 │                 └──────────┘ └──────────┘ └────────┘                │
+│                 ┌──────────┐                                       │
+│                 │ reranker │  (可选 Cross-Encoder 精排)              │
+│                 └──────────┘                                       │
 └──────────────────────────────────────────────────────────────────────┘
         │                              │
         ▼                              ▼
@@ -138,30 +148,42 @@
   │
   │ ◆ 用户提问 ◆
   ▼
-  ▼ HybridRetrieverAsync 并行检索
-  │     ├─ LogRetriever（向量检索，Qdrant）
-  │     └─ BM25Retriever（关键词检索，本地索引）
-  ▼ RRF 融合重排（1/(k+rank)）
-  ▼ PromptTemplates 构造证据链 Prompt
-  ▼ DeepSeekClient 调用 LLM（同步 / 流式）
-  ▼ SourceTracker 来源标注（[ID:xxx] → [n]）
-  ▼ QualityChecker 质量自检（幻觉检测等）
-  ▼ ErrorHandler 异常兜底
+  ▼ api/qa.py: detect_intent 路由分发
+  │     ├─ 聚合/统计类（"统计/数量/Top N/占比..."）→ services/nl2sql.ask
+  │     │     ├─ LLM 生成 SQL（DeepSeek + schema 提示）
+  │     │     ├─ 安全校验（禁写/强制 LIMIT）
+  │     │     └─ 只读执行 SQLite logs 表 + 格式化为五段式答案
+  │     └─ 其他问题 → RobustQAPipeline.ask（RAG 路径）
+  │           ├─ HybridRetrieverAsync 并行检索
+  │           │     ├─ LogRetriever（向量检索，Qdrant）
+  │           │     └─ BM25Retriever（关键词检索，本地索引）
+  │           ├─ RRF 融合重排（1/(k+rank)，OPT2 默认 v=1.0/b=2.0）
+  │           ├─ （可选）Reranker Cross-Encoder 精排
+  │           ├─ PromptTemplates 构造证据链 Prompt（含 DB 加载的多轮历史）
+  │           ├─ DeepSeekClient 调用 LLM（同步 / 流式 SSE）
+  │           ├─ QAPipeline 内置来源标注（[ID:xxx] → [n]）
+  │           ├─ QualityChecker 质量自检（幻觉检测等）
+  │           └─ ErrorHandler 异常兜底（兜底返回 confidence="低" 的 QAResult）
   ▼
-  返回 QAResult（答案 + 来源 + 置信度 + 耗时）
+  返回 QAResult（答案 + 来源 + 置信度 + 耗时 + retriever_type）
+  ▼
+  持久化 QAHistory（含 conversation_id + quality_check JSON）+ 审计日志
 ```
 
-### 2.3 装饰器式 Pipeline 增强
+### 2.3 Pipeline 编排模型
 
-`QAPipeline` 为基础问答流水线，项目通过装饰器模式叠加四类增强能力，可自由组合：
+`QAPipeline` 为基础问答流水线（检索 + Prompt + LLM + 内置来源提取）。生产路径通过 `RobustQAPipeline` 包装 `QAPipeline` 接管异常处理与重试，质量自检与多轮对话历史加载由 `api/qa.py` 路由层在调用前后编排：
 
 ```
-RobustQAPipeline        ← 异常兜底（最外层）
-  └─ QualityAwarePipeline   ← 质量自检
-       └─ SourceAwareQAPipeline  ← 来源溯源
-            └─ ConversationAwarePipeline  ← 多轮对话记忆
-                 └─ QAPipeline  ← 基础流水线（检索+Prompt+LLM）
+api/qa.py 路由层
+  ├─ _resolve_conversation_id / _load_conversation_history  ← DB 多轮上下文
+  ├─ _run_quality_check                                      ← QualityChecker（路由层调用）
+  └─ _build_pipeline → create_robust_pipeline(...)
+        └─ RobustQAPipeline ← 异常兜底（最外层）
+             └─ QAPipeline  ← 基础流水线（检索 + Prompt + LLM + 来源提取）
 ```
+
+> 说明：早期版本的 `ConversationAwarePipeline` / `SourceAwareQAPipeline` / `QualityAwarePipeline` 装饰器式包装已废弃（`services/conversation.py`、`services/source_tracking.py` 已于 2026-07-26 删除）。多轮对话改由 DB `qa_history.conversation_id` 持久化实现，来源溯源直接在 `QAPipeline` 内部完成，质量自检在路由层显式调用 `QualityChecker`。`services/quality_checker.py` / `services/error_handler.py` 仍保留 `QualityAwarePipeline` / `RobustQAPipeline` 类供脚本场景使用。
 
 ---
 
@@ -172,8 +194,8 @@ log-qa-system/
 ├── backend/                         # 后端 FastAPI 服务
 │   ├── api/                         # API 路由层
 │   │   ├── __init__.py
-│   │   ├── auth.py                  # 认证路由（注册/登录/me/登出）
-│   │   └── qa.py                    # 问答路由（占位，未实现）
+│   │   ├── auth.py                  # 认证 + 用户管理 + 改密路由
+│   │   └── qa.py                    # ★ 问答路由（同步/SSE/历史/会话/反馈/统计 + NL2SQL 路由）
 │   ├── core/                        # 核心配置层
 │   │   ├── __init__.py
 │   │   ├── config.py                # 应用配置类 Settings
@@ -182,42 +204,59 @@ log-qa-system/
 │   ├── data/                        # 日志数据 CSV
 │   │   ├── logs.csv
 │   │   └── logs_cleaned.csv
+│   ├── evaluation/                  # ★ RAGAS 评估框架与消融实验
+│   │   ├── __init__.py
+│   │   ├── eval_core.py             # 评估核心逻辑
+│   │   ├── ragas_config.py          # RAGAS 配置
+│   │   ├── testset_loader.py        # 测试集加载
+│   │   ├── data/                    # 测试集与实验结果（testset.json 60 条 QA + 各消融配置 JSON/raw.jsonl）
+│   │   ├── docs/                    # 评估报告与设计文档（reports/ablation_*.md 等）
+│   │   └── scripts/                 # 评估脚本（run_baseline/run_ablation/eval_split/build_testset/test_ragas）
 │   ├── models/                      # SQLAlchemy ORM 模型
 │   │   ├── __init__.py              # 统一导出
 │   │   ├── user.py                  # User + UserRole
 │   │   ├── log.py                   # Log
-│   │   ├── qa_history.py            # QAHistory + FeedbackType
+│   │   ├── qa_history.py            # QAHistory + FeedbackType（含 conversation_id + quality_check 字段）
 │   │   ├── audit_log.py             # AuditLog
-│   │   └── conversation.py          # 空占位文件
+│   │   └── conversation.py          # 空占位文件（会话持久化已合并到 qa_history）
 │   ├── schemas/                     # Pydantic 请求/响应 Schema
-│   │   ├── __init__.py              # 空
-│   │   ├── auth.py                  # LoginRequest/RegisterRequest/TokenResponse/UserResponse
-│   │   └── qa.py                    # 空占位文件
-│   ├── scripts/                     # 运维/数据脚本
+│   │   ├── __init__.py
+│   │   ├── auth.py                  # Login/Register/Token/UserResponse + SetRole/ChangePassword/DeleteUser
+│   │   └── qa.py                    # ★ QA 请求/响应 + 历史 + 会话 + 反馈 + 质量检查 Schema
+│   ├── scripts/                     # 运维/数据脚本 + 功能测试脚本
 │   │   ├── import_logs.py           # 日志批量入库
 │   │   ├── batch_vectorize.py       # 批量向量化入库 Qdrant
 │   │   ├── generate_logs.py         # 生成测试日志
 │   │   ├── check_db.py              # 检查数据库表
 │   │   ├── debug_bm25.py            # BM25 分词调试
-│   │   └── visualize_retrieval.py    # 检索结果可视化对比
+│   │   ├── visualize_retrieval.py   # 检索结果可视化对比
+│   │   ├── test_admin_view_conversation.py  # admin 查看他人会话权限测试
+│   │   ├── test_bm25.py / test_hybrid.py / test_retrieval.py
+│   │   ├── test_cleaner.py / test_parser.py / test_formatter.py
+│   │   ├── test_error_handling.py / test_quality_check.py / test_source_tracking.py
+│   │   ├── test_feedback_stats.py   # 反馈统计接口测试
+│   │   ├── test_llm.py / test_qa_pipeline.py
+│   │   ├── test_multi_turn.py       # 多轮对话测试
+│   │   ├── test_performance.py      # 性能测试
+│   │   └── test_role_security.py    # 角色/权限安全测试
 │   ├── services/                    # 核心业务服务层（RAG 核心）
 │   │   ├── __init__.py
-│   │   ├── qa_pipeline.py            # ★ 问答流水线编排
+│   │   ├── qa_pipeline.py            # ★ 问答流水线编排（内置来源提取）
 │   │   ├── hybrid_retriever.py       # ★ 混合检索器（RRF 融合）
 │   │   ├── retriever.py              # 向量检索器
 │   │   ├── bm25_retriever.py         # BM25 关键词检索器
 │   │   ├── qdrant_client.py          # Qdrant 客户端封装
 │   │   ├── embedder.py               # BGE 嵌入模型封装
+│   │   ├── reranker.py               # ★ Cross-Encoder 重排序（bge-reranker-base，可选）
+│   │   ├── nl2sql.py                 # ★ 聚合类问题 NL2SQL 路径（意图识别+生成+校验+执行）
 │   │   ├── llm_client.py             # DeepSeek LLM 客户端
 │   │   ├── prompt_templates.py       # Prompt 模板
 │   │   ├── chunker.py                # 日志文本分块器
 │   │   ├── formatter.py              # 检索结果格式化
 │   │   ├── log_parser.py             # 日志解析器
 │   │   ├── log_cleaner.py            # 日志清洗器
-│   │   ├── conversation.py           # 多轮对话记忆
-│   │   ├── source_tracking.py        # 来源溯源
 │   │   ├── quality_checker.py        # 回答质量自检
-│   │   ├── error_handler.py          # 统一异常处理
+│   │   ├── error_handler.py          # 统一异常处理（RobustQAPipeline）
 │   │   └── exceptions.py             # 自定义异常类
 │   ├── tests/                       # pytest 测试
 │   │   ├── conftest.py
@@ -231,6 +270,7 @@ log-qa-system/
 │   │   ├── __init__.py
 │   │   └── logger.py
 │   ├── main.py                      # FastAPI 应用入口
+│   ├── app.db                       # ★ SQLite 数据库文件（users / logs / qa_history / audit_logs）
 │   └── requirements.txt
 ├── frontend/                        # 前端 React 应用
 │   ├── public/
@@ -239,19 +279,23 @@ log-qa-system/
 │   ├── src/
 │   │   ├── api/
 │   │   │   ├── client.js            # axios 实例 + 拦截器
-│   │   │   └── auth.js              # 认证 API 封装
+│   │   │   ├── auth.js              # 认证 + 用户管理 + 改密 API 封装
+│   │   │   └── qa.js                # ★ 问答 API 封装（同步/SSE/历史/会话/反馈/统计）
 │   │   ├── assets/
 │   │   ├── components/
-│   │   │   └── ProtectedRoute.jsx   # 路由守卫
+│   │   │   ├── ProtectedRoute.jsx   # 通用路由守卫（已登录）
+│   │   │   ├── AdminRoute.jsx       # ★ admin 角色守卫（非 admin 跳转）
+│   │   │   ├── Chat.jsx / Chat.css              # ★ SSE 流式问答界面 + 来源卡片 + 反馈按钮 + 质量检查
+│   │   │   ├── ConversationSidebar.jsx / .css   # ★ 会话列表侧边栏
+│   │   │   └── ChangePasswordModal.jsx / .css   # ★ 修改密码弹窗
 │   │   ├── context/
 │   │   │   └── AuthContext.jsx      # 全局认证 Context
 │   │   ├── pages/
-│   │   │   ├── Dashboard.jsx        # 主问答界面（占位骨架）
-│   │   │   ├── Dashboard.css
-│   │   │   ├── Login.jsx            # 登录页
-│   │   │   ├── Login.css
-│   │   │   └── Register.jsx         # 注册页
-│   │   ├── App.jsx                  # 根组件 + 路由
+│   │   │   ├── Dashboard.jsx / .css # 主问答界面（含 Chat + ConversationSidebar）
+│   │   │   ├── Login.jsx / .css     # 登录页
+│   │   │   ├── Register.jsx         # 注册页
+│   │   │   └── UserManagement.jsx   # ★ 管理员用户管理界面（admin 专属）
+│   │   ├── App.jsx                  # 根组件 + 路由（含 /admin/users）
 │   │   ├── App.css
 │   │   ├── index.css
 │   │   └── main.jsx                 # 入口
@@ -260,7 +304,7 @@ log-qa-system/
 │   ├── vite.config.js
 │   └── README.md
 ├── docs/                            # 文档
-│   ├── frontend/                    # 前端目录副本（含 .env 示例）
+│   ├── frontend/                    # 前端目录副本（含 .env 示例，详见第 12 章）
 │   ├── API.md                       # 空
 │   ├── DEPLOY.md                    # 空
 │   └── 前后端启动.txt
@@ -316,10 +360,10 @@ log-qa-system/
 
 FastAPI 应用入口，职责：
 
-1. **应用生命周期管理**（`lifespan`）：启动时执行 `warmup()` 系统预热，关闭时释放混合检索器线程池。
+1. **应用生命周期管理**（`lifespan`）：启动时执行 `init_db()` 建表与轻量迁移，再执行 `warmup()` 系统预热；关闭时释放混合检索器线程池。
 2. **系统预热 `warmup()`**：依次预加载 jieba 词典、BGE 模型、BM25 索引、Qdrant 连接、混合检索器，避免首次请求冷启动延迟。
-3. **CORS 中间件**：允许 `http://localhost:5173`、`http://localhost:3000`。
-4. **路由注册**：仅注册 `api.auth`（前缀 `/api/auth`）；问答路由 `api.qa` 尚未接入。
+3. **CORS 中间件**：允许 `http://localhost:5173`、`http://localhost:5174`、`http://localhost:3000`。
+4. **路由注册**：`api.auth`（前缀 `/api/auth`，含认证 + 用户管理 + 改密）、`api.qa`（前缀 `/api/qa`，含问答同步/SSE/历史/会话/反馈/统计）。
 5. **健康检查**：`GET /`、`GET /health`。
 
 **关键对象**：
@@ -435,9 +479,10 @@ FastAPI 应用入口，职责：
 | `FeedbackType` | Enum | `LIKE`/`DISLIKE`/`NONE` |
 | `QAHistory` | ORM Model | 表 `qa_history` |
 
-`QAHistory` 字段：`id`、`user_id`(FK→users.id)、`question`、`answer`、`sources`(Text, JSON)、`feedback`、`created_at`。
+`QAHistory` 字段：`id`、`user_id`(FK→users.id)、`question`、`answer`、`sources`(Text, JSON)、`feedback`、`created_at`、`conversation_id`(String(64), index，多轮对话分组)、`quality_check`(Text, JSON，质量自检结果)。
 
 - 关系：`user = relationship("User", backref="qa_histories")`（多对一）。
+- 多轮对话：同一 `conversation_id` 下的多条 Q&A 记录组成一个会话；NULL 表示独立问答或旧数据。
 
 #### 5.3.4 audit_log.py
 
@@ -462,7 +507,7 @@ FastAPI 应用入口，职责：
 
 **路径**：[backend/models/conversation.py](file:///d:/log-qa-system/backend/models/conversation.py)
 
-**文件为空**，会话持久化模型未实现（当前对话记忆仅在内存中，见 `services/conversation.py`）。
+**文件为空**。会话持久化已合并到 `qa_history.conversation_id` 字段实现，无需独立 ORM 模型（见 5.3.3）。
 
 ---
 
@@ -475,15 +520,35 @@ FastAPI 应用入口，职责：
 | Schema | 字段 | 校验 |
 |--------|------|------|
 | `LoginRequest` | username, password | 3-50 / 6-50 字符 |
-| `RegisterRequest` | username, password, role(默认"user") | 同上 |
-| `TokenResponse` | access_token, token_type(默认"bearer"), username, role | — |
+| `RegisterRequest` | username, password | 同上（`role` 字段被忽略，强制 `user`） |
+| `TokenResponse` | access_token, token_type, username, role, user_id | — |
 | `UserResponse` | id, username, role, created_at(str) | — |
+| `SetRoleRequest` | role | `admin` / `user` |
+| `SetRoleResponse` | success, user_id, username, old_role, new_role, message | — |
+| `ChangePasswordRequest` | old_password, new_password | 新密码 6-50 字符，不能与旧密码相同 |
+| `ChangePasswordResponse` | success, message | — |
+| `DeleteUserResponse` | success, user_id, username, deleted_qa_count, message | — |
 
-> 注：`UserResponse.created_at` 为 `str` 类型，需业务层转换；未配置 `orm_mode`，ORM→Schema 转换需手动完成。
+> 注：`UserResponse.created_at` 为 `str` 类型，需业务层转换；未配置 `orm_mode`，ORM→Schema 转换需手动完成。注册接口的 `role` 入参被服务端强制忽略，统一注册为 `user`，admin 提权通过 `PATCH /api/auth/users/{id}/role`。
 
-#### 5.4.2 qa.py / __init__.py
+#### 5.4.2 qa.py — 问答 Schema
 
-均为空文件，问答 API 的请求/响应 Schema 尚未定义。
+**路径**：[backend/schemas/qa.py](file:///d:/log-qa-system/backend/schemas/qa.py)
+
+已实现问答 API 全部请求/响应 Schema：
+
+| Schema | 用途 |
+|--------|------|
+| `QARequest` | 问答请求：question / filters / top_k(1-50) / template_type / retriever_type / conversation_id |
+| `QASourceRef` | 来源引用：ref_id / log_id / service / timestamp / level / content / score / snippet |
+| `QAQualityIssue` | 质量检查单条问题：type / message / penalty / suggestion |
+| `QAQualityCheck` | 质量自检结果：passed / score(0-100) / issues[] / warnings[] / suggestions[] |
+| `QAResponse` | 问答响应：success / question / answer / sources[] / confidence / retriever_type / total_tokens / retrieval_time / llm_time / total_time / qa_id / conversation_id / quality_check / error |
+| `QAHistoryItem` / `QAHistoryListResponse` / `QAHistoryDetailResponse` | 问答历史列表与详情 |
+| `FeedbackRequest` / `FeedbackResponse` | 反馈请求/响应 |
+| `ConversationItem` / `ConversationListResponse` | 会话列表 |
+| `ConversationMessageItem` / `ConversationDetailResponse` / `ConversationDeleteResponse` | 会话详情与删除 |
+| `FeedbackStatsItem` / `FeedbackStatsResponse` | 反馈统计（含 scope / like_rate / top_disliked） |
 
 ---
 
@@ -501,24 +566,69 @@ FastAPI 应用入口，职责：
 |------|------|
 | `log_audit(db, user_id, username, action, resource, details, ip)` | 记录审计日志 |
 | `get_current_user(db, credentials)` | 依赖注入：从 Bearer Token 解析当前用户，401 时抛异常 |
+| `_require_admin(user)` | 校验当前用户是否为 admin，否则抛 403（管理员接口前置守卫） |
 
 **接口清单**：
 
 | 方法 | 路径 | 说明 | 认证 |
 |------|------|------|------|
-| POST | `/api/auth/register` | 用户注册，返回 UserResponse | 否 |
+| POST | `/api/auth/register` | 用户注册（role 强制为 user，忽略入参） | 否 |
 | POST | `/api/auth/login` | 用户登录，返回 JWT TokenResponse | 否 |
 | GET | `/api/auth/me` | 获取当前用户信息 | 是 |
+| POST | `/api/auth/me/password` | 修改自己的密码（验证旧密码） | 是 |
 | POST | `/api/auth/logout` | 登出（记录审计日志，客户端清 Token） | 是 |
+| GET | `/api/auth/users` | 查询所有用户列表（仅 admin，支持 username 模糊搜索） | admin |
+| PATCH | `/api/auth/users/{user_id}/role` | 修改用户角色 admin↔user（仅 admin，不能改自己） | admin |
+| DELETE | `/api/auth/users/{user_id}` | 删除用户（仅 admin，不能删自己，不能删最后一个 admin，级联删 QA 历史） | admin |
 
 - 登录失败会记录 `login_failed` 审计日志；成功记录 `login_success`。
-- `get_current_user` 作为 FastAPI 依赖，用于保护需要登录的接口。
+- `get_current_user` 作为 FastAPI 依赖，用于保护需要登录的接口；管理员接口在内部调用 `_require_admin` 二次校验。
 
 #### 5.5.2 qa.py — 问答路由
 
 **路径**：[backend/api/qa.py](file:///d:/log-qa-system/backend/api/qa.py)
 
-**文件为空**，问答 HTTP 接口尚未接入 `QAPipeline`。当前 `QAPipeline` 仅可通过脚本/测试调用。
+路由前缀 `/api/qa`，全部接口在 `qa.router` 中，需要登录（`get_current_user`）。
+
+**模块级常量**：
+
+| 名称 | 说明 |
+|------|------|
+| `MAX_HISTORY_TURNS` | 传给 LLM 的最大历史轮数（1 轮 = 1 user + 1 assistant），默认 5 |
+| `_quality_checker` | 进程级 `QualityChecker` 单例（无状态） |
+
+**辅助函数**：
+
+| 函数 | 说明 |
+|------|------|
+| `_run_quality_check(answer, sources, confidence)` | 调用 `QualityChecker` 并转换为 `QAQualityCheck` Schema，异常时返回 None 不影响主流程 |
+| `_build_pipeline(request)` | 构建 `RobustQAPipeline`（每请求新建），采用 OPT2 最优配置 `vector_weight=1.0 / bm25_weight=2.0`（偏 BM25，日志检索场景关键词匹配更重要） |
+| `_resolve_conversation_id(db, user_id, conversation_id)` | 解析会话 ID：复用已有会话时校验归属；不传或越权时新建 `conv_<uuid4_hex[:16]>` |
+| `_load_conversation_history(db, user_id, conversation_id, max_turns)` | 从 DB 加载多轮历史并转换为 `[{role, content}]`，按时间正序取最近 max_turns 轮 |
+| `_sse_event(event, data)` | 格式化单条 SSE 事件为 `event: ...\ndata: ...\n\n` |
+| `_parse_sources(sources_json)` / `_parse_quality_check(qc_json)` | 安全解析 JSON 字段 |
+
+**接口清单**：
+
+| 方法 | 路径 | 说明 | 路由 |
+|------|------|------|------|
+| POST | `/api/qa/ask` | 同步问答：`detect_intent` 路由（聚合类→NL2SQL，其他→RAG），返回 `QAResponse`（含 conversation_id / qa_id / quality_check） | RAG / NL2SQL |
+| POST | `/api/qa/ask/stream` | 流式问答（SSE）：事件 `source` / `answer` / `done` / `error`；done 含完整答案 + conversation_id + quality_check | RAG / NL2SQL |
+| GET | `/api/qa/history` | 查询当前用户问答历史（分页 / keyword / feedback 过滤） | — |
+| GET | `/api/qa/history/{history_id}` | 查询单条历史详情（仅自己的记录，否则 404） | — |
+| POST | `/api/qa/feedback/{qa_id}` | 提交点赞/点踩/取消反馈（仅自己的记录） | — |
+| GET | `/api/qa/conversations` | 查询会话列表（scope=me / scope=all 仅 admin；非 admin 传 all 降级为 me） | — |
+| GET | `/api/qa/conversations/{conversation_id}` | 查询会话详情（admin 可查任意会话并返回 owner_username；普通用户仅自己，否则 404） | — |
+| DELETE | `/api/qa/conversations/{conversation_id}` | 删除会话及其全部问答记录（仅自己的会话） | — |
+| GET | `/api/qa/feedback/stats` | 反馈统计（scope=me / scope=all 仅 admin；返回 like_rate + top_disliked 10 条） | — |
+
+**关键设计**：
+
+- **路由分发**：`ask` 与 `ask_stream` 在路由层调用 `services.nl2sql.detect_intent`，命中聚合关键词走 NL2SQL 路径，否则走 `RobustQAPipeline` RAG 路径。
+- **多轮对话**：路由层负责从 DB 加载历史并传入 `pipeline.ask(history=...)`，每次回答后持久化为 `QAHistory` 记录并携带 `conversation_id`，前端在后续提问中携带该 ID 维持上下文。
+- **兜底响应**：`RobustQAPipeline` 在 LLM 超时 / 检索故障重试失败时返回 `confidence="低" 且 source_refs 为空` 的 `QAResult`，路由层据此将响应标记为 `success=False` 并回填 `error` 字段，HTTP 状态码仍为 200（不抛 5xx）。
+- **质量自检**：在响应返回前对完整答案执行 `QualityChecker`，结果以 JSON 字符串存入 `qa_history.quality_check`，并同步返回到响应体供前端展示。
+- **审计日志**：每次 ask / ask_stream / feedback / delete_conversation 均调用 `log_audit` 记录关键信息（question 摘要、retriever_type、conversation_id、total_time 等）。
 
 ---
 
@@ -549,8 +659,8 @@ FastAPI 应用入口，职责：
 | `_search_vector / _search_bm25 / _search_hybrid` | 三种检索路径，统一转换为 dict 列表 |
 | `_extract_source_refs(answer, sources)` | 从回答解析 `[ID:xxx]` 引用并匹配日志，无引用时自动为前 5 条来源分配 `[n]` |
 | `_annotate_answer_with_refs(answer, source_refs)` | 将 `[ID:xxx]` 替换为 `[n]` |
-| `ask(question, filters, top_k, template_type) -> QAResult` | ★ 同步问答：检索→截断→构造 Prompt→调用 LLM→提取来源→标注→估计置信度→保存历史 |
-| `ask_stream(question, ...) -> Generator[StreamChunk]` | ★ 流式问答，先 yield 来源块，再逐块 yield 答案 |
+| `ask(question, filters, top_k, template_type, history) -> QAResult` | ★ 同步问答：检索→截断→构造 Prompt（含多轮 history）→调用 LLM→提取来源→标注→估计置信度。历史持久化由调用方（api/qa.py）负责 |
+| `ask_stream(question, ..., history) -> Generator[StreamChunk]` | ★ 流式问答，先 yield 来源块，再逐块 yield 答案；支持 history 多轮上下文 |
 | `ask_with_context(question, logs, template_type) -> str` | 跳过检索，基于给定日志直接问答 |
 | `clear_history()` / `get_history()` | 对话历史管理 |
 | `_estimate_confidence(logs, answer) -> str` | 估计"高/中/低"置信度（基于引用数、分段完整性、日志数） |
@@ -775,35 +885,56 @@ FastAPI 应用入口，职责：
 - `clean_batch(logs) -> Dict`：批量清洗并返回统计
 - `print_report(result)`：打印清洗报告
 
-#### 5.6.13 conversation.py — 多轮对话记忆
+#### 5.6.13 nl2sql.py — 聚合类问题 NL2SQL 路径 ★
 
-**路径**：[backend/services/conversation.py](file:///d:/log-qa-system/backend/services/conversation.py)
+**路径**：[backend/services/nl2sql.py](file:///d:/log-qa-system/backend/services/nl2sql.py)
 
-| 类 | 说明 |
-|----|------|
-| `Message` (dataclass) | role, content, timestamp |
-| `Conversation` (dataclass) | id, messages, created_at, updated_at, metadata |
-| `ConversationBufferMemory` | ★ 对话缓冲区记忆，支持滑动窗口与摘要压缩 |
-| `ConversationAwarePipeline` | 包装 `QAPipeline` 添加对话记忆 |
+聚合/统计类问题（如"每个服务各多少条日志"、"最常见错误 Top 5"）不检索文档，而是直接在 SQLite `logs` 表上执行 SQL，避免 LLM 基于文档统计产生幻觉。由 `api/qa.py` 的 `detect_intent` 路由分发。
 
-**`ConversationBufferMemory` 关键方法**：`create_conversation`、`get_conversation`、`add_message`、`get_history`、`get_context_for_llm`（自动 token 估算截断，约 2.5 字符/token）、`set_summary`、`clear`、`delete`、`list_conversations`、`to_dict`/`from_dict`。
+**模块常量**：
 
-**便捷函数**：`create_conversation_pipeline(top_k, retriever_type, template_type, max_messages, enable_summary)`。
+| 名称 | 说明 |
+|------|------|
+| `SCHEMA_HINT` | 提供给 LLM 的 logs 表 schema 提示（字段/索引/数据库） |
+| `AGGREGATION_KEYWORDS` | 意图识别关键词列表（统计/数量/占比/Top N/最常见/各服务/按天/趋势/对比 等） |
+| `FORBIDDEN_PATTERNS` | SQL 安全校验禁止模式（DROP/DELETE/UPDATE/INSERT/ALTER/CREATE/TRUNCATE 等、多语句、注释） |
 
-#### 5.6.14 source_tracking.py — 来源溯源
+**核心函数**：
 
-**路径**：[backend/services/source_tracking.py](file:///d:/log-qa-system/backend/services/source_tracking.py)
+| 函数 | 说明 |
+|------|------|
+| `detect_intent(question) -> "nl2sql" / "rag"` | 意图识别：命中聚合关键词返回 `nl2sql`，否则 `rag`（关键词匹配，零成本） |
+| `generate_sql(question, llm_client) -> (sql, tokens)` | 调用 DeepSeek 生成 SQL（带 schema 提示 + 安全规则 + 示例），清理 markdown 标记、截断多语句、强制加 LIMIT |
+| `validate_sql(sql) -> (is_valid, error_message)` | 安全校验：必须 SELECT 开头、不匹配禁止模式 |
+| `execute_sql(sql, db_path="app.db") -> dict` | 以只读模式（`file:...?mode=ro`）执行 SQL，返回 columns/rows/row_count/execution_time/error |
+| `format_sql_result(question, sql, result) -> str` | 格式化为五段式答案（与 evidence_chain 模板风格一致），含 SQL 代码块 + Markdown 表格 + 自然语言总结 |
+| `_generate_summary(question, cols, rows, n)` | 从结果生成简短自然语言总结（标量/单行/分组分别处理） |
+| `ask(question, db_path="app.db") -> QAResult` | ★ NL2SQL 路径入口：生成→校验→执行→格式化，返回 `retriever_type="nl2sql"` 的 `QAResult`（sources 为空，confidence="高"） |
 
-| 类 | 说明 |
-|----|------|
-| `SourceReference` (dataclass) | ref_id, log_id, service, timestamp, level, content, score, snippet |
-| `SourceAnnotatedAnswer` (dataclass) | question, answer, sources, confidence, total_tokens |
-| `SourceTracker` | 来源追踪器，支持双向追溯（回答→日志，日志→回答） |
-| `SourceAwareQAPipeline` | 包装 `QAPipeline` 自动添加引用标注 |
+> 设计要点：意图识别采用关键词匹配（快速零成本）；SQL 校验 + 只读模式连接双重保险防写操作；任何阶段失败都返回带 `confidence="低"` 的兜底 `QAResult`，不抛异常。
 
-**`SourceTracker` 关键方法**：`add_source`、`get_ref`、`get_refs_for_log`、`annotate_answer`（`[ID:xxx]`→`[n]`）、`get_reference_list`、`format_reference_list(markdown/json/text)`。
+#### 5.6.14 reranker.py — Cross-Encoder 重排序 ★
 
-**便捷函数**：`create_source_aware_pipeline(top_k, retriever_type, template_type)`。
+**路径**：[backend/services/reranker.py](file:///d:/log-qa-system/backend/services/reranker.py)
+
+基于 BAAI/bge-reranker-base 的 Cross-Encoder 精排器。双塔检索（BGE 向量点积）速度快但精度有限，Cross-Encoder 将 `[query, doc]` 拼接联合编码可捕捉细粒度交互。典型用法：双塔/BM25 取 Top-N（N=20）后用 Cross-Encoder 重排到 Top-K（K=5）。
+
+| 类常量 | 值 |
+|--------|-----|
+| `MODEL_NAME` | `BAAI/bge-reranker-base`（约 1.1GB，中文优化） |
+| `LOCAL_MODEL_ROOT` | `./models_cache/models/BAAI--bge-reranker-base/snapshots/master` |
+
+**`Reranker` 关键方法**：
+
+| 方法 | 说明 |
+|------|------|
+| `__init__(model_name, device)` | 自动选 cuda/cpu，优先加载本地快照，否则从 ModelScope 下载 |
+| `rerank(query, docs, top_k=5, content_field="content") -> List[dict]` | 对文档列表打分排序，返回 Top-K 并注入 `rerank_score` / 保留 `original_score` |
+| `is_available() -> bool` | 模型是否就绪 |
+
+**单例**：`get_reranker() -> Reranker`。
+
+> 说明：重排序器为可选组件，目前未在 `_build_pipeline` 默认链路中启用，主要用于离线评估与消融实验。`rerank()` 会将 service/level 拼接到文档内容前以提升重排质量。
 
 #### 5.6.15 quality_checker.py — 回答质量自检
 
@@ -864,18 +995,76 @@ QASystemError(Exception)                      # 基础异常，error_code="QA_ER
 
 ### 5.7 脚本层 scripts/
 
+脚本层分为两类：运维数据脚本（导入/向量化/生成日志）与功能测试脚本（针对 services 和 api 层的端到端验证）。
+
+**运维/数据脚本**：
+
 | 脚本 | 用途 | 运行方式 |
 |------|------|----------|
 | `import_logs.py` | 将 `logs_cleaned.csv` 批量导入 SQLite，按 (message, service) 去重，支持 `--csv/--batch-size/--stats/--clear` | `python scripts/import_logs.py` |
 | `batch_vectorize.py` | 从 DB 读取日志→分块→向量化→写入 Qdrant，支持断点续传（`vectorize_checkpoint.json`，每 30s 存档）、重建、干跑 | `python scripts/batch_vectorize.py --rebuild` |
 | `generate_logs.py` | 生成 10000 条模拟日志到 `logs.csv`（5 个服务、4 个级别） | `python scripts/generate_logs.py` |
-| `check_db.py` | 列出 `logs.db` 表名（注意：写死 `logs.db`，与默认 `app.db` 不同） | `python scripts/check_db.py` |
+| `check_db.py` | 列出 SQLite 表名（注意：写死 `logs.db`，与默认 `app.db` 不同，详见第 12 章） | `python scripts/check_db.py` |
 | `debug_bm25.py` | 调试 BM25 分词与匹配效果 | `python scripts/debug_bm25.py` |
 | `visualize_retrieval.py` | 三种检索（向量/BM25/混合）结果对比可视化（ANSI 彩色） | `python scripts/visualize_retrieval.py` |
 
+**功能测试脚本**（直接 `python scripts/test_*.py` 运行，无需 pytest）：
+
+| 脚本 | 验证内容 |
+|------|----------|
+| `test_admin_view_conversation.py` | admin 查看他人会话详情、普通用户越权访问返回 404 |
+| `test_role_security.py` | 角色权限安全：非 admin 调管理接口返回 403、admin 不能改自己角色/删自己/删最后一个 admin |
+| `test_feedback_stats.py` | 反馈统计接口、scope=all 降级、like_rate 计算、top_disliked 返回 |
+| `test_multi_turn.py` | 多轮对话：conversation_id 复用、历史加载、跨用户越权新建会话 |
+| `test_qa_pipeline.py` | QAPipeline 端到端问答、来源标注 |
+| `test_quality_check.py` | QualityChecker 各子检查器 |
+| `test_source_tracking.py` | 来源引用解析（保留脚本，对应服务已合并到 QAPipeline） |
+| `test_error_handling.py` | RobustQAPipeline 异常兜底 |
+| `test_bm25.py` / `test_hybrid.py` / `test_retrieval.py` | 各检索器功能 |
+| `test_cleaner.py` / `test_parser.py` / `test_formatter.py` | 数据处理组件 |
+| `test_llm.py` | DeepSeekClient 调用 |
+| `test_performance.py` | 性能测试 |
+
+### 5.8 评估模块 evaluation/ ★
+
+**路径**：[backend/evaluation/](file:///d:/log-qa-system/backend/evaluation/)
+
+新增的 RAGAS 评估框架，用于量化问答质量并指导检索/Prompt 参数调优。结论已反哺生产配置（`_build_pipeline` 的 OPT2 权重即来自此处消融实验）。
+
+**模块结构**：
+
+| 路径 | 说明 |
+|------|------|
+| `eval_core.py` | 评估核心逻辑：对测试集逐条跑 QAPipeline，收集 QAResult 与检索证据 |
+| `ragas_config.py` | RAGAS 评估指标配置（faithfulness / answer_relevancy / context_precision / context_recall 等） |
+| `testset_loader.py` | 加载 `data/testset.json`（60 条标注 QA，含 question / ground_truth / expected_sources） |
+| `data/testset.json` | 60 条人工标注 QA 测试集 |
+| `data/ablation_*.json` / `*_raw.jsonl` | 各消融配置的评估结果（A0~A5 / OPT / OPT2） |
+| `data/ablation_summary.json` | 消融实验汇总 |
+| `docs/` | 评估报告与设计文档（`ablation_design.md` / `baseline_analysis.md` / `optimization_report_v2.md` / `reports/ablation_*.md`） |
+| `scripts/run_baseline.py` | 基线评估 |
+| `scripts/run_ablation.py` | 消融实验主脚本（A0~A5 + OPT/OPT2） |
+| `scripts/eval_split.py` | 分路径评估（vector / bm25 / hybrid / nl2sql） |
+| `scripts/build_testset.py` | 测试集构建脚本 |
+| `scripts/test_ragas.py` | RAGAS 集成验证 |
+
+**消融实验配置**（`data/ablation_summary.json` 汇总）：
+
+- A0~A5：检索器组合、权重、是否重排序、Prompt 模板等单变量对照
+- OPT / OPT2：综合最优配置，其中 **OPT2（vector_weight=1.0 / bm25_weight=2.0）** 在日志检索场景下 `context_precision` / `answer_relevancy` 最优，已采纳为生产默认配置
+
+**运行方式**：
+
+```bash
+cd backend
+python -m evaluation.scripts.run_baseline          # 基线评估
+python -m evaluation.scripts.run_ablation          # 全量消融实验
+python -m evaluation.scripts.eval_split            # 分路径评估
+```
+
 ---
 
-### 5.8 测试层 tests/
+### 5.9 测试层 tests/
 
 **pytest 配置**（`pytest.ini`）：
 
@@ -910,7 +1099,7 @@ INTEGRATION_TEST=true pytest tests/ -m integration              # 启用集成
 
 ---
 
-### 5.10 数据文件 data/
+### 5.11 数据文件 data/
 
 - `logs.csv` / `logs_cleaned.csv`：列结构 `timestamp, level, service, ip, message, trace_id`
 - 服务：`auth-service`、`order-service`、`payment-service`、`user-service`、`notification-service`
@@ -930,10 +1119,11 @@ INTEGRATION_TEST=true pytest tests/ -m integration              # 启用集成
 BrowserRouter
 └─ AuthProvider
    └─ Routes
-      ├─ /login        → <Login />
-      ├─ /register     → <Register />
-      ├─ /dashboard    → <ProtectedRoute><Dashboard /></ProtectedRoute>
-      └─ /             → <Navigate to="/dashboard" replace />
+      ├─ /login         → <Login />
+      ├─ /register      → <Register />
+      ├─ /dashboard      → <ProtectedRoute><Dashboard /></ProtectedRoute>
+      ├─ /admin/users    → <ProtectedRoute><AdminRoute><UserManagement /></AdminRoute></ProtectedRoute>
+      └─ /              → <Navigate to="/dashboard" replace />
 ```
 
 ### 6.2 API 层
@@ -944,14 +1134,34 @@ BrowserRouter
 - **请求拦截器**：从 `localStorage` 读 `access_token`，自动加 `Authorization: Bearer`
 - **响应拦截器**：401 时清 `access_token`/`user` 并跳转 `/login`
 
-**[api/auth.js](file:///d:/log-qa-system/frontend/src/api/auth.js)**：
+**[api/auth.js](file:///d:/log-qa-system/frontend/src/api/auth.js)**：认证 + 用户管理 + 改密 API 封装
 
 | 函数 | 端点 |
 |------|------|
 | `register(username, password)` | POST `/api/auth/register` |
 | `login(username, password)` | POST `/api/auth/login` |
 | `getCurrentUser()` | GET `/api/auth/me` |
+| `changePassword(old, new)` | POST `/api/auth/me/password` |
+| `getAllUsers(username?)` | GET `/api/auth/users`（admin） |
+| `setUserRole(userId, role)` | PATCH `/api/auth/users/{id}/role`（admin） |
+| `deleteUser(userId)` | DELETE `/api/auth/users/{id}`（admin） |
 | `logout()` | 本地清理（不调后端） |
+
+**[api/qa.js](file:///d:/log-qa-system/frontend/src/api/qa.js)**：★ 问答 API 封装
+
+| 函数 | 端点 | 说明 |
+|------|------|------|
+| `askQuestion(params)` | POST `/api/qa/ask` | 同步问答，返回 `QAResponse`（含 `conversation_id`） |
+| `askStreamQuestion(params, handlers)` | POST `/api/qa/ask/stream` | ★ SSE 流式问答：用原生 `fetch` + `ReadableStream` 消费，回调 `onSource` / `onAnswer` / `onDone` / `onError`；axios 对流式响应支持不佳故单独用 fetch |
+| `getHistoryList(params)` | GET `/api/qa/history` | 历史列表（分页 / keyword / feedback） |
+| `getHistoryDetail(id)` | GET `/api/qa/history/{id}` | 单条历史详情 |
+| `submitFeedback(qaId, feedback)` | POST `/api/qa/feedback/{qaId}` | 点赞/点踩/取消 |
+| `getConversations()` | GET `/api/qa/conversations` | 会话列表 |
+| `getConversationDetail(id)` | GET `/api/qa/conversations/{id}` | 会话详情（完整多轮） |
+| `deleteConversation(id)` | DELETE `/api/qa/conversations/{id}` | 删除会话 |
+| `getFeedbackStats(params)` | GET `/api/qa/feedback/stats` | 反馈统计（scope=me/all） |
+
+> 内部 `_parseSseEvent(block)`：按 SSE 协议解析单个事件块（`event:` / `data:` 行），返回 `{type, data}`。
 
 ### 6.3 状态管理
 
@@ -970,15 +1180,31 @@ BrowserRouter
 - 未认证 → `<Navigate to="/login" replace />`
 - 已认证 → 渲染 `children`
 
-### 6.5 页面
+**[components/AdminRoute.jsx](file:///d:/log-qa-system/frontend/src/components/AdminRoute.jsx)**：★ admin 角色守卫
+- 非 admin 用户 → 跳转 `/dashboard`（或显示无权限提示）
+- admin → 渲染 `children`
+- 配合 `ProtectedRoute` 嵌套使用，先验证登录再验证角色
+
+### 6.5 组件
+
+| 组件 | 路径 | 说明 |
+|------|------|------|
+| `Chat` | [components/Chat.jsx](file:///d:/log-qa-system/frontend/src/components/Chat.jsx) | ★ 核心问答界面：SSE 流式输出（调 `askStreamQuestion`）、来源卡片展示、点赞/点踩反馈按钮、质量自检结果显示、多轮上下文（携带 `conversation_id`） |
+| `ConversationSidebar` | [components/ConversationSidebar.jsx](file:///d:/log-qa-system/frontend/src/components/ConversationSidebar.jsx) | ★ 会话列表侧边栏：展示历史会话、切换/删除会话、新建会话 |
+| `ChangePasswordModal` | [components/ChangePasswordModal.jsx](file:///d:/log-qa-system/frontend/src/components/ChangePasswordModal.jsx) | ★ 修改密码弹窗（验证旧密码 + 新密码确认） |
+| `ProtectedRoute` | [components/ProtectedRoute.jsx](file:///d:/log-qa-system/frontend/src/components/ProtectedRoute.jsx) | 通用路由守卫（见 6.4） |
+| `AdminRoute` | [components/AdminRoute.jsx](file:///d:/log-qa-system/frontend/src/components/AdminRoute.jsx) | admin 角色守卫（见 6.4） |
+
+### 6.6 页面
 
 | 页面 | 状态 | 说明 |
 |------|------|------|
-| [Login.jsx](file:///d:/log-qa-system/frontend/src/pages/Login.jsx) | ✅ 完成 | 登录表单，页脚提示测试账号 `admin / admin123` |
-| [Register.jsx](file:///d:/log-qa-system/frontend/src/pages/Register.jsx) | ✅ 完成 | 注册表单（用户名≥3、密码≥6、确认密码），成功后跳登录 |
-| [Dashboard.jsx](file:///d:/log-qa-system/frontend/src/pages/Dashboard.jsx) | ⚠️ 占位 | 顶部显示用户名/角色/登出；主体为占位卡片"问答界面开发中..."，**实际 QA 聊天界面未实现** |
+| [Login.jsx](file:///d:/log-qa-system/frontend/src/pages/Login.jsx) | 完成 | 登录表单，页脚提示测试账号 `admin / admin123` |
+| [Register.jsx](file:///d:/log-qa-system/frontend/src/pages/Register.jsx) | 完成 | 注册表单（用户名≥3、密码≥6、确认密码），成功后跳登录 |
+| [Dashboard.jsx](file:///d:/log-qa-system/frontend/src/pages/Dashboard.jsx) | 完成 | 主问答界面：顶部用户名/角色/登出 + 改密入口；主体为 `<Chat />` + `<ConversationSidebar />` 组合 |
+| [UserManagement.jsx](file:///d:/log-qa-system/frontend/src/pages/UserManagement.jsx) | 完成 | ★ 管理员用户管理界面（admin 专属）：用户列表 + 模糊搜索 + 改角色 + 删用户 |
 
-### 6.6 构建配置
+### 6.7 构建配置
 
 **[vite.config.js](file:///d:/log-qa-system/frontend/vite.config.js)**：仅启用 `@vitejs/plugin-react`，未配置端口/代理/别名。跨域由后端 CORS 解决。
 
@@ -1006,43 +1232,57 @@ BrowserRouter
 ### 7.2 问答流程（在线）
 
 ```
-用户提问
+用户提问（POST /api/qa/ask 或 /api/qa/ask/stream）
   │
   ▼
-QAPipeline.ask(question, filters, top_k)
+api/qa.py 路由层
   │
-  ├─ 1. 检索（HybridRetrieverAsync.search）
-  │     ├─ asyncio.gather 并行：
-  │     │   ├─ LogRetriever.search（BGE 向量化 → Qdrant 检索）
-  │     │   └─ BM25Retriever.search（jieba 分词 → BM25Okapi）
-  │     ├─ RRF 融合：rrf_score = w_v/(k+rank_v) + w_b/(k+rank_b)
-  │     └─ 按 rrf_score 排序取 Top-K
+  ├─ 0. 解析会话 ID（_resolve_conversation_id）
+  │     ├─ 传 conversation_id 且属于当前用户 → 复用
+  │     └─ 不传 / 越权 → 新建 conv_<uuid4_hex[:16]>
   │
-  ├─ 2. 截断过长日志（max_log_length=300）
+  ├─ 1. 从 DB 加载多轮历史（_load_conversation_history，最近 5 轮）
   │
-  ├─ 3. 构造 Prompt（build_qa_prompt, evidence_chain 模板）
-  │     ├─ SYSTEM_PROMPT
-  │     ├─ format_chat_history（最近 6 轮）
-  │     └─ format_logs_as_context（日志列表）
+  ├─ 2. 意图路由（services.nl2sql.detect_intent）
+  │     ├─ 聚合/统计类 → NL2SQL 路径：
+  │     │     ├─ generate_sql（DeepSeek 生成 SQL + schema 提示）
+  │     │     ├─ validate_sql（禁写校验 + 强制 LIMIT）
+  │     │     ├─ execute_sql（只读模式连 app.db logs 表）
+  │     │     └─ format_sql_result（五段式答案 + Markdown 表格）
+  │     │     → 返回 retriever_type="nl2sql" 的 QAResult（无 sources）
+  │     │
+  │     └─ 其他问题 → RAG 路径（_build_pipeline → RobustQAPipeline.ask）
+  │           ├─ 检索（HybridRetrieverAsync.search）
+  │           │     ├─ asyncio.gather 并行：
+  │           │     │   ├─ LogRetriever.search（BGE 向量化 → Qdrant 检索）
+  │           │     │   └─ BM25Retriever.search（jieba 分词 → BM25Okapi）
+  │           │     ├─ RRF 融合：rrf_score = w_v/(k+rank_v) + w_b/(k+rank_b)
+  │           │     │   （OPT2 默认 w_v=1.0 / w_b=2.0）
+  │           │     └─ 按 rrf_score 排序取 Top-K
+  │           ├─ 截断过长日志（max_log_length=300）
+  │           ├─ 构造 Prompt（build_qa_prompt, evidence_chain 模板）
+  │           │     ├─ SYSTEM_PROMPT
+  │           │     ├─ format_chat_history（DB 加载的历史）
+  │           │     └─ format_logs_as_context（日志列表）
+  │           ├─ 调用 LLM（DeepSeekClient.chat / chat_stream）
+  │           ├─ 提取来源（_extract_source_refs：[ID:xxx] → 匹配日志 → [n]）
+  │           ├─ 标注回答（_annotate_answer_with_refs：[ID:xxx] → [n]）
+  │           └─ 估计置信度（_estimate_confidence：高/中/低）
+  │           （异常时 RobustQAPipeline 兜底返回 confidence="低" 的 QAResult）
   │
-  ├─ 4. 调用 LLM（DeepSeekClient.chat）
-  │     └─ messages = [system, user] → response
+  ├─ 3. 质量自检（_run_quality_check，QualityChecker）
+  │     → 6 个子检查：来源引用 / 幻觉模式 / 置信度对齐 / 证据充分 / 逻辑一致 / 分段完整
   │
-  ├─ 5. 提取来源（_extract_sources）
+  ├─ 4. 持久化 QAHistory（含 conversation_id + quality_check JSON）+ 审计日志
   │
-  ├─ 6. 解析引用（_extract_source_refs：[ID:xxx] → 匹配日志 → [n]）
-  │
-  ├─ 7. 标注回答（_annotate_answer_with_refs：[ID:xxx] → [n]）
-  │
-  ├─ 8. 估计置信度（_estimate_confidence：高/中/低）
-  │
-  ├─ 9. 保存对话历史（conversation_history）
-  │
-  └─ 返回 QAResult
+  └─ 返回 QAResponse
         ├─ answer（带 [n] 标注）
-        ├─ source_refs（来源列表）
-        ├─ confidence
+        ├─ sources（QASourceRef 列表）
+        ├─ confidence / retriever_type / total_tokens
+        ├─ qa_id / conversation_id
+        ├─ quality_check
         └─ retrieval_time / llm_time / total_time
+        （兜底时 success=False + error 字段，HTTP 仍 200）
 ```
 
 ### 7.3 认证流程
@@ -1092,11 +1332,12 @@ QAPipeline.ask(question, filters, top_k)
 | `ResultFormatter` / `RetrievedLog` | services/formatter.py | 结果格式化 |
 | `LogParser` | services/log_parser.py | 日志解析 |
 | `LogCleaner` | services/log_cleaner.py | 日志清洗 |
-| `ConversationBufferMemory` / `ConversationAwarePipeline` | services/conversation.py | 对话记忆 |
-| `SourceTracker` / `SourceAwareQAPipeline` | services/source_tracking.py | 来源溯源 |
+| `Reranker` | services/reranker.py | ★ Cross-Encoder 重排序（可选） |
 | `QualityChecker` / `QualityAwarePipeline` | services/quality_checker.py | 质量自检 |
 | `ErrorHandler` / `RobustQAPipeline` | services/error_handler.py | 异常处理 |
 | `QASystemError` 及子类 | services/exceptions.py | 自定义异常 |
+
+> 说明：`detect_intent` / `generate_sql` / `validate_sql` / `execute_sql` / `format_sql_result` / `ask` 等 NL2SQL 函数定义在 `services/nl2sql.py`（模块级函数，非类）。早期 `services/conversation.py` 的 `ConversationBufferMemory` / `ConversationAwarePipeline` 与 `services/source_tracking.py` 的 `SourceTracker` / `SourceAwareQAPipeline` 已删除（2026-07-26），多轮对话改用 DB `qa_history.conversation_id`，来源溯源合并到 `QAPipeline` 内部。
 
 ### 8.2 单例函数索引
 
@@ -1107,27 +1348,33 @@ QAPipeline.ask(question, filters, top_k)
 | `get_qdrant_client()` | `QdrantClientWrapper` | services/qdrant_client.py |
 | `get_embedder()` | `BGEEmbedder` | services/embedder.py |
 | `get_hybrid_retriever_async(...)` | `HybridRetrieverAsync` | services/hybrid_retriever.py |
+| `get_reranker()` | `Reranker` | services/reranker.py |
 
 ### 8.3 工厂函数索引
 
 | 函数 | 返回 |
 |------|------|
 | `create_pipeline(...)` | `QAPipeline` |
-| `create_conversation_pipeline(...)` | `ConversationAwarePipeline` |
-| `create_source_aware_pipeline(...)` | `SourceAwareQAPipeline` |
 | `create_quality_pipeline(...)` | `QualityAwarePipeline` |
-| `create_robust_pipeline(...)` | `RobustQAPipeline` |
+| `create_robust_pipeline(...)` | `RobustQAPipeline`（★ 生产路径使用，`api/qa.py._build_pipeline` 调用） |
+
+> 已废弃：`create_conversation_pipeline` / `create_source_aware_pipeline`（对应服务文件已删除）。
 
 ### 8.4 前端核心组件/Hook 索引
 
 | 名称 | 文件 | 职责 |
 |------|------|------|
-| `App` | App.jsx | 根组件 + 路由 |
+| `App` | App.jsx | 根组件 + 路由（含 /admin/users） |
 | `AuthProvider` / `useAuth` | context/AuthContext.jsx | 全局认证状态 |
-| `ProtectedRoute` | components/ProtectedRoute.jsx | 路由守卫 |
-| `Login` / `Register` / `Dashboard` | pages/ | 页面 |
+| `ProtectedRoute` | components/ProtectedRoute.jsx | 通用路由守卫（已登录） |
+| `AdminRoute` | components/AdminRoute.jsx | ★ admin 角色守卫 |
+| `Chat` | components/Chat.jsx | ★ SSE 流式问答界面 |
+| `ConversationSidebar` | components/ConversationSidebar.jsx | ★ 会话列表侧边栏 |
+| `ChangePasswordModal` | components/ChangePasswordModal.jsx | ★ 改密弹窗 |
+| `Login` / `Register` / `Dashboard` / `UserManagement` | pages/ | 页面（UserManagement 为 admin 专属） |
 | `apiClient` | api/client.js | axios 实例 |
-| `login/register/getCurrentUser/logout` | api/auth.js | 认证 API |
+| `login/register/getCurrentUser/logout/changePassword/getAllUsers/setUserRole/deleteUser` | api/auth.js | 认证 + 用户管理 + 改密 API |
+| `askQuestion/askStreamQuestion/getHistoryList/getHistoryDetail/submitFeedback/getConversations/getConversationDetail/deleteConversation/getFeedbackStats` | api/qa.js | ★ 问答 API 封装 |
 
 ---
 
@@ -1139,8 +1386,16 @@ QAPipeline.ask(question, filters, top_k)
 main.py
   ├─ api.auth ──┬─ core.database (get_db)
   │             ├─ core.security (JWT/bcrypt)
-  │             ├─ models.user / models.audit_log
+  │             ├─ models.user / models.audit_log / models.qa_history
   │             └─ schemas.auth
+  ├─ api.qa ───┬─ core.database (get_db)
+  │            ├─ api.auth (get_current_user / log_audit)
+  │            ├─ models.qa_history / models.user
+  │            ├─ schemas.qa
+  │            ├─ services.qa_pipeline (QAResult)
+  │            ├─ services.error_handler (create_robust_pipeline / RobustQAPipeline)
+  │            ├─ services.quality_checker (QualityChecker)
+  │            └─ services.nl2sql (detect_intent / ask)  ← 延迟导入
   └─ (warmup) services.embedder / bm25_retriever / qdrant_client / hybrid_retriever
 
 services.qa_pipeline
@@ -1150,6 +1405,11 @@ services.qa_pipeline
   ├─ services.bm25_retriever (BM25Retriever)    │
   └─ services.hybrid_retriever ─────────────────┤
                                                 │
+services.nl2sql
+  ├─ services.llm_client (DeepSeekClient)
+  ├─ services.qa_pipeline (QAResult)
+  └─ sqlite3 (只读连 app.db logs 表)
+
 services.hybrid_retriever                       │
   ├─ services.retriever ────────────────────────┤
   ├─ services.bm25_retriever ──────────────────┤
@@ -1160,6 +1420,11 @@ services.retriever                              │
   ├─ services.qdrant_client ───────────────────┘
   ├─ services.formatter
   └─ core.config
+
+services.reranker（可选，未默认启用）
+  ├─ sentence_transformers (CrossEncoder)
+  ├─ torch
+  └─ modelscope (模型下载)
 
 services.bm25_retriever
   ├─ jieba (中文分词)
@@ -1176,13 +1441,20 @@ services.embedder
 services.llm_client
   └─ httpx (HTTP 客户端)
 
-services.{conversation,source_tracking,quality_checker,error_handler}
-  └─ services.qa_pipeline (延迟导入，装饰器增强)
+services.{quality_checker,error_handler}
+  └─ services.qa_pipeline (延迟导入)
+
+evaluation/（离线评估，独立模块）
+  ├─ services.qa_pipeline / services.nl2sql
+  ├─ ragas（评估指标）
+  └─ scripts/run_*.py
 
 外部服务：
   ├─ Qdrant 云（向量库，QDRANT_URL）
   └─ DeepSeek API（LLM，DEEPSEEK_BASE_URL）
 ```
+
+> 已删除模块：`services/conversation.py`、`services/source_tracking.py`（2026-07-26 删除），原依赖关系不再生效。
 
 ### 9.2 数据库表关系
 
@@ -1195,12 +1467,23 @@ logs                              [独立表，无外键]
 ### 9.3 前后端依赖
 
 ```
-前端 axios ──HTTP/JWT──→ 后端 FastAPI
+前端 axios / fetch ──HTTP/JWT──→ 后端 FastAPI
   /api/auth/register
   /api/auth/login
   /api/auth/me
+  /api/auth/me/password
   /api/auth/logout
-  (问答接口待开发)
+  /api/auth/users（admin）
+  /api/auth/users/{id}/role（admin）
+  /api/auth/users/{id}（admin）
+  /api/qa/ask
+  /api/qa/ask/stream（SSE，用 fetch）
+  /api/qa/history
+  /api/qa/history/{id}
+  /api/qa/feedback/{qa_id}
+  /api/qa/feedback/stats
+  /api/qa/conversations
+  /api/qa/conversations/{id}
 ```
 
 ---
@@ -1218,6 +1501,8 @@ venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 # 额外依赖（requirements.txt 未列出）
 pip install jieba rank_bm25 nltk httpx modelscope
+# 可选：启用 Cross-Encoder 重排序（评估场景）需 sentence_transformers 已装
+# 可选：运行 evaluation/ 评估脚本需 pip install ragas
 # 首次运行 nltk 会自动下载 punkt/stopwords
 ```
 
@@ -1236,12 +1521,12 @@ npm install
 # DeepSeek LLM
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
 DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-pro   # 或 deepseek-v4-flash；deepseek-chat 已废弃
 
 # Qdrant 向量库
 QDRANT_URL=https://your-qdrant-cluster-url
 QDRANT_API_KEY=your-qdrant-api-key
-QDRANT_COLLECTION_NAME=log_vectors
+QDRANT_COLLECTION_NAME=log_knowledge   # 注：qdrant_client.py 默认 log_vectors，需在 .env 显式统一
 
 # JWT
 SECRET_KEY=your-secret-key
@@ -1259,7 +1544,7 @@ LOG_CHUNK_OVERLAP=50
 VITE_API_BASE_URL=http://localhost:8000
 ```
 
-> 提示：`docs/frontend/.env` 有示例可参考。`.gitignore` 会忽略 `.env`，但保留 `.env.example`。
+> 提示：`docs/frontend/.env` 有示例可参考。`.gitignore` 会忽略 `.env`，但保留 `.env.example`。配置不一致问题详见第 12 章。
 
 ### 10.3 数据初始化
 
@@ -1333,7 +1618,7 @@ python scripts/visualize_retrieval.py    # 三种检索结果对比（交互式�
 |------|--------|------|
 | `DEEPSEEK_API_KEY` | (空) | DeepSeek API 密钥（**必填**） |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek API 地址 |
-| `DEEPSEEK_MODEL` | `deepseek-v4-pro` | LLM 模型名 |
+| `DEEPSEEK_MODEL` | `deepseek-v4-pro` | LLM 模型名（`deepseek-chat` 已废弃，应使用 `deepseek-v4-pro` 或 `deepseek-v4-flash`） |
 | `QDRANT_URL` | (空) | Qdrant 集群地址（**必填**） |
 | `QDRANT_API_KEY` | (空) | Qdrant API Key（**必填**） |
 | `QDRANT_COLLECTION_NAME` | `log_knowledge` | Collection 名（注：qdrant_client.py 默认 `log_vectors`，**两处不一致**） |
@@ -1353,30 +1638,65 @@ python scripts/visualize_retrieval.py    # 三种检索结果对比（交互式�
 
 ## 12. 已知问题与注意事项
 
-1. **问答 API 未接入**：`api/qa.py` 为空，`QAPipeline` 目前仅能通过脚本/测试调用，前端 Dashboard 问答界面为占位骨架。HTTP 接口层与前端聊天 UI 是待补全的核心功能。
+### 12.1 权限与安全约束（硬约束）
 
-2. **配置不一致**：
-   - `QDRANT_COLLECTION_NAME` 在 `core/config.py` 默认 `log_knowledge`，而 `services/qdrant_client.py` 默认 `log_vectors`，需统一或在 `.env` 显式配置。
-   - `DEEPSEEK_MODEL` 在 `core/config.py` 默认 `deepseek-v4-pro`，但 `llm_client.py` 的 `DeepSeekConfig` 默认 `deepseek-chat`，以 `llm_client.py` 实际生效为准。
+以下硬约束源自项目内存（`project_memory.md`），在权限相关开发中必须严格遵守：
 
-3. **数据库文件不统一**：`scripts/check_db.py` 写死 `logs.db`，而 `core/database.py` 默认 `app.db`，两者可能指向不同数据库文件。
+- **数据隔离**：用户只能访问自己的 QA 历史和反馈数据。`/api/qa/history`、`/api/qa/history/{id}`、`/api/qa/feedback/{qa_id}` 均通过 `QAHistory.user_id == current_user.id` 过滤，越权访问返回 404（不区分"不存在"与"不属于你"，避免泄露存在性）。
+- **scope 降级**：非 admin 用户在 `/api/qa/conversations` 与 `/api/qa/feedback/stats` 使用 `scope=all` 时，自动降级为 `scope=me`（不报错，静默降级）。
+- **会话详情越权**：非 admin 用户访问他人会话详情返回 404；admin 可访问任意会话详情，响应中额外返回 `owner_username` 便于识别归属。
+- **角色管理**：admin 不能修改自己的角色（避免唯一管理员被降级后无人管理）。
+- **用户删除**：用户不能删除自己；最后一个 admin 不能被删除（避免无人管理系统）；删除用户时级联删除其 `qa_history` 记录，但保留 `audit_log` 便于追溯。
+- **注册角色固定**：前端注册固定为 `user` 角色，注册接口（`POST /api/auth/register`）的 `role` 入参被服务端强制忽略。
+- **统一错误响应**：错误响应统一返回 HTTP 200 + `success=false`，不抛 5xx（`RobustQAPipeline` 兜底）；鉴权类错误（401/403/404/422）仍走标准 HTTP 状态码。
 
-4. **空文件/未实现**：
-   - `models/conversation.py`、`schemas/qa.py`、`schemas/__init__.py`、`utils/logger.py`、`utils/__init__.py` 为空。
-   - `docs/API.md`、`docs/DEPLOY.md`、根 `README.md` 为空。
-   - `frontend/src/App.css` 为 Vite 模板残留，未被业务使用。
+### 12.2 配置不一致
 
-5. **依赖未列入 requirements.txt**：`jieba`、`rank_bm25`、`nltk`、`httpx`、`modelscope` 需手动安装。
+- **QDRANT_COLLECTION_NAME**：`core/config.py` 默认 `log_knowledge`，而 `services/qdrant_client.py` 默认 `log_vectors`，需在 `.env` 显式统一（生产建议 `log_knowledge`）。
+- **DEEPSEEK_MODEL**：`core/config.py` 默认 `deepseek-v4-pro`，但 `llm_client.py` 的 `DeepSeekConfig` 历史默认 `deepseek-chat`。**`deepseek-chat` 已废弃**，应使用 `deepseek-v4-pro` 或 `deepseek-v4-flash`；以 `core/config.py` 的 `settings.DEEPSEEK_MODEL` 为准，确保在 `.env` 显式配置。
+- **数据库路径**：实际 app DB 为 `backend/app.db`（不是 `log_qa.db` 或 `logs.db`）；`logs` 表内容字段名为 `message`（不是 `content`）。NL2SQL 的 `SCHEMA_HINT` 与 ORM 模型均使用 `message`，正确无误。
 
-6. **时间戳策略**：所有 ORM 模型使用 Python 端 `datetime.now`，而非数据库端 `func.now()`，多实例部署可能产生时间偏差。
+### 12.3 数据库文件不统一
 
-7. **对话记忆未持久化**：`Conversation` 模型为空，对话历史仅在内存（`QAPipeline.conversation_history`），服务重启即丢失。
+- `scripts/check_db.py` 写死 `logs.db`，而 `core/database.py` 默认 `app.db`，两者指向不同数据库文件。运行 `check_db.py` 查看的是 `logs.db` 而非实际应用库 `app.db`，使用时需注意。
 
-8. **`docs/frontend/` 目录**：存在一份与 `frontend/` 几乎相同的前端副本（含 `.env`），疑似开发快照，实际使用的是根 `frontend/` 目录。
+### 12.4 空文件 / 占位
 
-9. **检索测试数据依赖**：多数检索测试需 Qdrant 有数据，否则 `pytest.skip`；集成测试需 `INTEGRATION_TEST=true`。
+- `models/conversation.py`：空占位文件（会话持久化已合并到 `qa_history.conversation_id`，无需独立模型）。
+- `utils/__init__.py`、`utils/logger.py`：空文件，各模块通过 `logging.basicConfig` 局部配置 logger。
+- `schemas/__init__.py`：空文件。
+- `docs/API.md`、`docs/DEPLOY.md`、根 `README.md`：空文件。
+- `frontend/src/App.css`：Vite 模板残留，未被业务使用。
 
-10. **CORS 配置**：后端仅允许 `localhost:5173` 和 `localhost:3000`，生产部署需调整。
+### 12.5 依赖未列入 requirements.txt
+
+`jieba`、`rank_bm25`、`nltk`、`httpx`、`modelscope` 需手动安装。运行 `evaluation/` 评估脚本需额外 `pip install ragas`。启用 `services/reranker.py` 需 `sentence_transformers`（已在 requirements.txt）+ `torch`，并下载 `BAAI/bge-reranker-base` 模型。
+
+### 12.6 时间戳策略
+
+所有 ORM 模型使用 Python 端 `datetime.now`，而非数据库端 `func.now()`，多实例部署可能产生时间偏差。
+
+### 12.7 `docs/frontend/` 目录
+
+存在一份与 `frontend/` 几乎相同的前端副本（含 `.env`），疑似开发快照，**实际使用的是根 `frontend/` 目录**。`docs/frontend/.env` 可作为配置参考，但不应作为运行目录。
+
+### 12.8 检索测试数据依赖
+
+多数检索测试需 Qdrant 有数据，否则 `pytest.skip`；集成测试需 `INTEGRATION_TEST=true`。功能测试脚本（`scripts/test_*.py`）多需后端服务运行中且已初始化数据。
+
+### 12.9 CORS 配置
+
+后端允许 `localhost:5173`、`localhost:5174`、`localhost:3000`，生产部署需调整。
+
+### 12.10 已废弃模块
+
+以下早期模块已删除（2026-07-26），相关文档描述如仍提及均为历史信息：
+
+- `services/conversation.py`（`ConversationBufferMemory` / `ConversationAwarePipeline`）→ 多轮对话改由 DB `qa_history.conversation_id` 实现
+- `services/source_tracking.py`（`SourceTracker` / `SourceAwareQAPipeline`）→ 来源溯源合并到 `QAPipeline` 内部
+- 对应工厂函数 `create_conversation_pipeline` / `create_source_aware_pipeline` 同步废弃
+
+> `scripts/test_source_tracking.py` 仍保留，用于验证来源引用解析逻辑（现由 `QAPipeline._extract_source_refs` 承担）。
 
 ---
 
