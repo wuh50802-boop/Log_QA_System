@@ -153,7 +153,7 @@ class QdrantClientWrapper:
 
             if not exists:
                 logger.info(f"📦 创建 Collection: {self.collection_name}")
-                
+
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=VectorParams(
@@ -164,14 +164,12 @@ class QdrantClientWrapper:
                         "m": 16,
                         "ef_construct": 100,
                         "full_scan_threshold": 10000,
-                        "max_indexing_threads": 4,
                         "on_disk": False,
                     },
                     optimizers_config={
                         "default_segment_number": 2,
                         "indexing_threshold": 10000,
                         "flush_interval_sec": 5,
-                        "max_optimization_threads": 4,
                     },
                 )
                 logger.info(f"✅ Collection {self.collection_name} 创建完成")
@@ -226,9 +224,14 @@ class QdrantClientWrapper:
         self,
         points: List[PointStruct],
         batch_size: int = 20,
+        wait: bool = True,
     ) -> bool:
         """
         批量插入向量点（带重试）
+
+        Args:
+            wait: 是否等待服务端写入完成。
+                批量导入时设 wait=False 可大幅提升吞吐（跳过每批的确认往返）。
         """
         if not points:
             return True
@@ -240,15 +243,68 @@ class QdrantClientWrapper:
                 self.client.upsert(
                     collection_name=self.collection_name,
                     points=batch,
-                    wait=True,
+                    wait=wait,
                 )
                 logger.debug(f"   ✅ 已入库 {i+len(batch)}/{total}")
             except Exception as e:
                 logger.error(f"❌ 入库失败 (批次 {i//batch_size}): {e}")
                 raise QdrantRetryableError(f"Upsert failed: {e}")
-        
-        logger.info(f"✅ 成功入库 {total} 个向量")
+
+        logger.info(f"✅ 成功入库 {total} 个向量 (wait={wait})")
         return True
+
+    def update_indexing_threshold(self, threshold: int) -> bool:
+        """
+        更新 indexing_threshold，用于批量导入时关闭后台索引、导入后再触发索引构建。
+
+        - threshold 取较大值（如 10**9）：导入阶段不构建 HNSW 索引，写入更快
+        - threshold 恢复正常值（如 10000）：触发已写入段的后台索引构建
+        """
+        try:
+            from qdrant_client.http.models import OptimizersConfigDiff
+            self.client.update_collection(
+                collection_name=self.collection_name,
+                optimizer_config=OptimizersConfigDiff(
+                    indexing_threshold=threshold,
+                ),
+            )
+            logger.info(f"✅ 更新 indexing_threshold = {threshold}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 更新 indexing_threshold 失败: {e}")
+            return False
+
+    def wait_for_indexing(self, timeout: int = 600) -> bool:
+        """
+        轮询等待后台索引构建完成（indexed_count 达到 vectors_count 并稳定）。
+
+        用于批量导入完成后等待 Qdrant 把刚写入的向量构建成 HNSW 索引。
+        """
+        start = time.time()
+        last_indexed = -1
+        stable_count = 0
+        while time.time() - start < timeout:
+            try:
+                info = self.client.get_collection(self.collection_name)
+                vectors_count = getattr(info, 'vectors_count', getattr(info, 'points_count', 0)) or 0
+                indexed_count = getattr(info, 'indexed_vectors_count', getattr(info, 'indexed_points_count', 0)) or 0
+                logger.info(f"⏳ 索引进度: {indexed_count}/{vectors_count}")
+                if vectors_count > 0 and indexed_count >= vectors_count:
+                    return True
+                # 连续 3 次索引数未变化，认为构建已稳定（可能部分段未达 indexing_threshold）
+                if indexed_count == last_indexed:
+                    stable_count += 1
+                    if stable_count >= 3:
+                        logger.warning("⚠️ 索引数连续 3 次未变化，认为已稳定，停止等待")
+                        return True
+                else:
+                    stable_count = 0
+                last_indexed = indexed_count
+            except Exception as e:
+                logger.warning(f"查询索引状态失败: {e}")
+            time.sleep(5)
+        logger.warning(f"⚠️ 等待索引超时 ({timeout}s)")
+        return False
 
     @retry_on_failure(max_retries=2, delay=1, backoff=2)
     def search(

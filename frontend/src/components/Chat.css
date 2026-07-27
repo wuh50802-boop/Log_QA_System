@@ -547,8 +547,15 @@
   padding: 12px 20px;
   border-top: 1px solid var(--border-default);
   display: flex;
+  flex-direction: column;
   gap: 10px;
   background: var(--bg-surface);
+}
+
+/* 输入行（输入框 + 发送按钮） */
+.chat-input-row {
+  display: flex;
+  gap: 10px;
 }
 
 .chat-input {
@@ -927,5 +934,170 @@
 @media (max-width: 768px) {
   .stats-cards {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* ============================================================
+   检索过滤面板（黑白灰风格，与 quality/sources 折叠组件一致）
+   ============================================================ */
+
+/* 折叠条：过滤按钮 + 清空按钮 */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.filter-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-weight: 500;
+  transition: var(--transition);
+}
+
+.filter-toggle-btn:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.filter-toggle-btn.filter-toggle-open {
+  background: var(--bg-subtle);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+/* 已激活过滤条件时，按钮左侧加黑色竖条强调 */
+.filter-toggle-btn.filter-toggle-active {
+  border-left: 2px solid var(--accent);
+}
+
+.filter-toggle-icon {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  line-height: 1;
+}
+
+.filter-toggle-btn:hover .filter-toggle-icon,
+.filter-toggle-open .filter-toggle-icon {
+  color: var(--text-primary);
+}
+
+.filter-toggle-text {
+  font-size: var(--text-xs);
+}
+
+/* 已激活条件数徽标（黑底白字） */
+.filter-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1;
+  margin-left: 2px;
+}
+
+/* 清空按钮（次级文本按钮） */
+.filter-clear-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  transition: var(--transition);
+}
+
+.filter-clear-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+
+/* 展开后的过滤面板 */
+.filter-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  animation: sources-expand 0.15s ease-out;
+}
+
+.filter-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.filter-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 160px;
+}
+
+.filter-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.filter-select,
+.filter-input {
+  padding: 6px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  outline: none;
+  transition: var(--transition);
+}
+
+.filter-select:focus,
+.filter-input:focus {
+  border-color: var(--accent);
+}
+
+.filter-select:hover:not(:focus),
+.filter-input:hover:not(:focus) {
+  border-color: var(--border-strong);
+}
+
+/* 未选时让占位项变浅 */
+.filter-select:invalid,
+.filter-select option[value=""] {
+  color: var(--text-faint);
+}
+
+@media (max-width: 768px) {
+  .filter-row {
+    flex-direction: column;
+  }
+
+  .filter-field {
+    min-width: 0;
   }
 }

@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
-from api import auth, qa
+from api import auth, qa, ingest
 
 # 配置日志
 logging.basicConfig(
@@ -128,6 +128,10 @@ Authorization: Bearer <access_token>
             "description": "智能问答核心接口:同步问答、SSE 流式问答、问答历史查询、点赞/点踩反馈。",
         },
         {
+            "name": "日志入库",
+            "description": "日志采集与入库管理:生成模拟日志、上传 CSV 入库、任务进度查询、统计概览。仅 admin 可用。",
+        },
+        {
             "name": "系统",
             "description": "系统健康检查端点,用于服务监控和容器探针。",
         },
@@ -150,6 +154,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])
 app.include_router(qa.router, prefix="/api/qa", tags=["问答"])
+app.include_router(ingest.router, prefix="/api/ingest", tags=["日志入库"])
 
 # 健康检查
 @app.get("/", summary="根路径健康检查", tags=["系统"])

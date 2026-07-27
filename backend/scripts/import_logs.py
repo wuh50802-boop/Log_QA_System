@@ -6,6 +6,7 @@
 import sys
 import os
 from pathlib import Path
+from typing import Dict, List
 
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -75,15 +76,15 @@ def get_log_fields():
 
 # ============ 主导入函数 ============
 def import_logs(csv_path: Path = CSV_PATH, batch_size: int = BATCH_SIZE):
-    """从 CSV 文件批量导入日志到数据库"""
-    
+    """从 CSV 文件批量导入日志到数据库（保留原命令行入口用）"""
+
     logger.info(f"开始导入日志: {csv_path}")
-    
+
     # 1. 检查文件是否存在
     if not csv_path.exists():
         logger.error(f"CSV 文件不存在: {csv_path}")
         return False
-    
+
     # 2. 读取 CSV
     try:
         df = pd.read_csv(csv_path, encoding="utf-8")
@@ -92,47 +93,80 @@ def import_logs(csv_path: Path = CSV_PATH, batch_size: int = BATCH_SIZE):
     except Exception as e:
         logger.error(f"读取 CSV 失败: {e}")
         return False
-    
-    # 3. 获取 Log 模型的有效字段
-    log_fields = get_log_fields()
-    logger.info(f"Log 模型可导入字段: {log_fields}")
-    
-    # 4. 检查必要字段
-    required_fields = ['timestamp', 'level', 'message']
-    missing = [f for f in required_fields if f not in df.columns]
-    if missing:
-        logger.error(f"CSV 缺少必要字段: {missing}")
-        return False
-    
-    # 5. 数据清洗
+
+    # 3. 数据清洗（简化版，仅做基本规范化；严格校验请走 LogParser + LogCleaner）
     logger.info("开始清洗数据...")
     df['timestamp'] = df['timestamp'].apply(parse_timestamp)
     df['level'] = df['level'].astype(str).str.strip().str.upper()
     df['message'] = df['message'].apply(clean_message)
-    
+
     # 处理 service 字段
     if 'service' in df.columns:
         df['service'] = df['service'].astype(str).str.strip().fillna('default')
     else:
         df['service'] = 'default'
-    
+
     # 处理 ip 字段
     if 'ip' in df.columns:
         df['ip'] = df['ip'].fillna('0.0.0.0')
     else:
         df['ip'] = '0.0.0.0'
-    
+
     # 处理 trace_id 字段
     if 'trace_id' in df.columns:
         df['trace_id'] = df['trace_id'].fillna('')
     else:
         df['trace_id'] = ''
-    
+
     # 填充空值
     df['level'] = df['level'].fillna('INFO')
     df['service'] = df['service'].fillna('default')
-    
-    # 6. 过滤重复数据
+
+    # 4. 转成 dict 列表，交给统一入库函数
+    records = df.to_dict(orient='records')
+    inserted, skipped = bulk_insert_logs(records, batch_size=batch_size)
+
+    show_stats()
+    return True
+
+
+def bulk_insert_logs(logs: List[Dict], batch_size: int = 500) -> tuple:
+    """
+    将清洗后的日志 dict 列表批量插入数据库（供 ingest_service 调用）。
+
+    输入要求：
+    - logs: 已经过 LogParser + LogCleaner 处理的 dict 列表
+    - 每个 dict 应包含: timestamp(datetime 或 str), level, service, message
+    - 可选字段: ip, trace_id
+
+    返回:
+        (inserted_count, skipped_count)
+    """
+    if not logs:
+        logger.info("无日志可导入")
+        return 0, 0
+
+    logger.info(f"开始批量导入 {len(logs)} 条日志...")
+
+    # 1. 统一字段类型 + 处理 timestamp
+    normalized = []
+    for row in logs:
+        item = dict(row)
+        # timestamp 转 datetime
+        ts = item.get('timestamp')
+        if isinstance(ts, str):
+            item['timestamp'] = parse_timestamp(ts)
+        elif ts is None:
+            item['timestamp'] = datetime.now()
+        # 字符串字段兜底
+        item['level'] = str(item.get('level', 'INFO')).upper()
+        item['service'] = str(item.get('service', 'default')) or 'default'
+        item['message'] = clean_message(item.get('message', ''))
+        item['ip'] = str(item.get('ip', '0.0.0.0')) or '0.0.0.0'
+        item['trace_id'] = str(item.get('trace_id', '')) or ''
+        normalized.append(item)
+
+    # 2. 数据库去重（基于 message + service）
     logger.info("检查数据库中已有日志...")
     db = SessionLocal()
     try:
@@ -141,59 +175,47 @@ def import_logs(csv_path: Path = CSV_PATH, batch_size: int = BATCH_SIZE):
         logger.info(f"数据库中已有 {len(existing_set)} 条日志记录")
     finally:
         db.close()
-    
-    # 去重
-    df['_key'] = df.apply(lambda row: (row['message'], row['service']), axis=1)
-    df_new = df[~df['_key'].isin(existing_set)]
-    df_new = df_new.drop(columns=['_key'])
-    
-    duplicate_count = len(df) - len(df_new)
-    if duplicate_count > 0:
-        logger.info(f"发现 {duplicate_count} 条重复日志，已过滤")
-    
-    if len(df_new) == 0:
+
+    new_records = []
+    skipped = 0
+    for row in normalized:
+        key = (row['message'], row['service'])
+        if key in existing_set:
+            skipped += 1
+            continue
+        new_records.append(row)
+        existing_set.add(key)  # 防止本批内重复
+
+    if not new_records:
         logger.info("所有日志已存在，无需导入")
-        return True
-    
-    # 7. 只保留 Log 模型存在的字段
-    csv_columns = df_new.columns.tolist()
-    usable_columns = [col for col in csv_columns if col in log_fields]
-    
-    # 确保所有必要字段都存在
-    for field in ['timestamp', 'level', 'service', 'message']:
-        if field not in usable_columns:
-            usable_columns.append(field)
-    
-    logger.info(f"将导入字段: {usable_columns}")
-    df_filtered = df_new[usable_columns].copy()
-    
-    # 8. 批量入库
-    logger.info(f"开始批量导入 {len(df_filtered)} 条新日志...")
-    
-    records = df_filtered.to_dict(orient='records')
-    inserted_count = 0
-    
-    with tqdm(total=len(records), desc="导入进度", unit="条") as pbar:
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i + batch_size]
-            
+        return 0, skipped
+
+    # 3. 批量入库
+    log_fields = get_log_fields()
+    inserted = 0
+
+    with tqdm(total=len(new_records), desc="导入进度", unit="条") as pbar:
+        for i in range(0, len(new_records), batch_size):
+            batch = new_records[i:i + batch_size]
+
             logs_to_insert = []
             for row in batch:
+                # 只保留 Log 模型存在的字段
+                filtered = {k: v for k, v in row.items() if k in log_fields}
                 try:
-                    log = Log(**row)
-                    logs_to_insert.append(log)
+                    logs_to_insert.append(Log(**filtered))
                 except Exception as e:
-                    logger.error(f"创建 Log 对象失败: {e}, 数据: {row}")
+                    logger.error(f"创建 Log 对象失败: {e}, 数据: {filtered}")
                     continue
-            
+
             if not logs_to_insert:
                 continue
-            
+
             db = SessionLocal()
             try:
                 db.bulk_save_objects(logs_to_insert)
                 db.commit()
-                inserted_count += len(logs_to_insert)
+                inserted += len(logs_to_insert)
                 pbar.update(len(logs_to_insert))
             except Exception as e:
                 db.rollback()
@@ -203,22 +225,16 @@ def import_logs(csv_path: Path = CSV_PATH, batch_size: int = BATCH_SIZE):
                     try:
                         db.add(log_obj)
                         db.commit()
-                        inserted_count += 1
+                        inserted += 1
                         pbar.update(1)
                     except Exception as e2:
                         db.rollback()
                         logger.error(f"单条插入失败: {e2}")
             finally:
                 db.close()
-    
-    # 9. 输出统计
-    logger.info(f"✅ 导入完成: 成功导入 {inserted_count} 条日志")
-    logger.info(f"   总日志数: {len(df)} 条")
-    logger.info(f"   已存在: {duplicate_count} 条")
-    logger.info(f"   新增: {inserted_count} 条")
-    
-    show_stats()
-    return True
+
+    logger.info(f"导入完成: 成功 {inserted} 条, 跳过重复 {skipped} 条")
+    return inserted, skipped
 
 
 # ============ 统计信息函数（修复版） ============

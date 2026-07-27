@@ -122,6 +122,11 @@ const ConversationSidebar = ({
     onClose?.();
   };
 
+  const handleLogsMgmt = () => {
+    setUserMenuOpen(false);
+    onClose?.();
+  };
+
   const handleLogout = () => {
     setUserMenuOpen(false);
     logout();
@@ -260,6 +265,15 @@ const ConversationSidebar = ({
                 onClick={handleUserMgmt}
               >
                 用户管理
+              </Link>
+            )}
+            {isAdmin && (
+              <Link
+                to="/admin/logs"
+                className="conv-menu-item"
+                onClick={handleLogsMgmt}
+              >
+                日志管理
               </Link>
             )}
             <div className="conv-menu-divider" />

@@ -1,0 +1,456 @@
+/* ============================================================
+   日志管理页面样式（黑白灰，与 UserManagement 对齐）
+   ============================================================ */
+
+.admin-logs-container {
+  min-height: 100vh;
+  background: var(--bg-page);
+}
+
+/* ---------- 顶部导航 ---------- */
+.admin-logs-header {
+  background: var(--bg-surface);
+  padding: 12px 28px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border-default);
+  height: 56px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.admin-logs-title-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+}
+
+.admin-logs-header h1 {
+  font-size: var(--text-md);
+  color: var(--text-primary);
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.admin-logs-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  font-size: var(--text-base);
+  color: var(--text-secondary);
+}
+
+/* ---------- 主体 ---------- */
+.admin-logs-main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 28px 24px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* ---------- 提示条 ---------- */
+.admin-logs-error {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.admin-logs-toast {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-strong);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+/* ---------- 区块通用 ---------- */
+.stats-section,
+.action-section,
+.tasks-section {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+}
+
+.section-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0 0 12px;
+  letter-spacing: -0.01em;
+}
+
+.section-hint {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin: 0 0 16px;
+  line-height: 1.6;
+}
+
+.section-hint code {
+  background: var(--bg-subtle);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+.loading-placeholder,
+.empty-placeholder {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  padding: 16px 0;
+  text-align: center;
+}
+
+/* ---------- 统计卡片 ---------- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.stat-card {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-card-wide {
+  grid-column: span 3;
+}
+
+.stat-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.stat-value {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.stat-time {
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.stat-distribution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.dist-pill {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.dist-pill.dist-error {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+/* ---------- 表单 ---------- */
+.action-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-field-file {
+  flex: 1;
+  min-width: 280px;
+}
+
+.form-label {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.form-field input[type="number"] {
+  padding: 6px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  outline: none;
+  transition: var(--transition);
+  width: 140px;
+}
+
+.form-field input[type="number"]:focus {
+  border-color: var(--accent);
+}
+
+.form-field input[type="file"] {
+  padding: 4px 0;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.form-field input[type="file"]::file-selector-button {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  margin-right: 10px;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  transition: var(--transition);
+}
+
+.form-field input[type="file"]::file-selector-button:hover {
+  background: var(--bg-page);
+  border-color: var(--border-strong);
+}
+
+.file-name {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.form-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.form-checkbox input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.action-btn {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 8px 18px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: var(--transition);
+  font-family: inherit;
+}
+
+.action-btn:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.action-btn:disabled {
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  cursor: not-allowed;
+}
+
+/* ---------- 任务列表 ---------- */
+.task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.task-card {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.task-card-running {
+  border-left: 3px solid var(--accent);
+}
+
+.task-card-failed {
+  border-left: 3px solid var(--accent);
+  background: var(--bg-surface);
+}
+
+.task-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.task-type {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.task-id {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace;
+}
+
+.task-time {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  margin-left: auto;
+}
+
+.status-badge {
+  font-size: var(--text-xs);
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-weight: 500;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+}
+
+.status-badge.status-running {
+  background: var(--accent);
+  color: var(--text-inverse);
+  border-color: var(--accent);
+}
+
+.status-badge.status-done {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.status-badge.status-failed {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--bg-surface);
+}
+
+.task-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.step-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  color: var(--text-muted);
+}
+
+.step-pill.step-done {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.step-pill.step-running {
+  color: var(--text-inverse);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.step-pill.step-failed {
+  color: var(--text-primary);
+  border-color: var(--accent);
+}
+
+.step-pill.step-skipped {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.step-name {
+  font-weight: 500;
+}
+
+.step-detail {
+  color: inherit;
+  opacity: 0.8;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-error {
+  font-size: var(--text-xs);
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+}
+
+.task-artifact {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 768px) {
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .stat-card-wide {
+    grid-column: span 2;
+  }
+
+  .action-form {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .form-field input[type="number"] {
+    width: 100%;
+  }
+
+  .task-time {
+    margin-left: 0;
+  }
+}

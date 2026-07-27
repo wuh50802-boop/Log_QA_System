@@ -225,6 +225,16 @@ export const getFeedbackStats = async (params = {}) => {
   return response.data;
 };
 
+/**
+ * 获取检索过滤器可选值（level / service）
+ * 返回数据库中实际存在的 distinct 值，避免前端硬编码
+ * @returns {Promise<{levels: string[], services: string[]}>}
+ */
+export const getFilterOptions = async () => {
+  const response = await apiClient.get('/api/qa/filters');
+  return response.data.data;
+};
+
 // ============================================================
 // 统一导出（便于集中导入）
 // ============================================================
@@ -238,4 +248,5 @@ export default {
   getConversationDetail,
   deleteConversation,
   getFeedbackStats,
+  getFilterOptions,
 };

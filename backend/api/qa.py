@@ -1105,3 +1105,40 @@ def get_feedback_stats(
         like_rate=like_rate,
         top_disliked=top_disliked,
     )
+
+
+# ============================================================
+# 过滤器选项：返回数据库中实际存在的 level / service 列表
+# ============================================================
+
+@router.get(
+    "/filters",
+    summary="获取检索过滤器可选值（level / service）",
+)
+def get_filter_options(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    返回当前数据库中实际存在的 level 和 service distinct 值，
+    供前端过滤器下拉框动态加载（避免硬编码不匹配真实数据）。
+    """
+    from models.log import Log
+
+    levels = [
+        row[0] for row in
+        db.query(Log.level).distinct().order_by(Log.level).all()
+        if row[0]
+    ]
+    services = [
+        row[0] for row in
+        db.query(Log.service).distinct().order_by(Log.service).all()
+        if row[0]
+    ]
+    return {
+        "success": True,
+        "data": {
+            "levels": levels,
+            "services": services,
+        },
+    }

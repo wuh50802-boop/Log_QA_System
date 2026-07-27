@@ -31,6 +31,11 @@ models_cache/
 performance_results.json
 *.log
 
+# 入库运行时生成的中间文件（CSV/转换产物/失败日志）
+backend/data/
+# 外部下载的原始数据集（体积大，不入库）
+backend/datasets/
+
 # IDE & Editor
 .vscode/
 .idea/

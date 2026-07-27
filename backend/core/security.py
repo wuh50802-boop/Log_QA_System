@@ -107,3 +107,58 @@ def get_username_from_token(token: str) -> Optional[str]:
     if payload:
         return payload.get("sub")
     return None
+
+
+def create_task_token(user_id: int, username: str, task_id: str,
+                      expires_days: int = 7) -> str:
+    """
+    生成入库任务专用的长期 token。
+
+    用于任务进度轮询，不受登录 token 30 分钟过期限制。
+    payload 中带 scope=task + task_id，仅能访问 /api/ingest/tasks/{task_id}。
+
+    Args:
+        user_id: 用户 ID
+        username: 用户名
+        task_id: 关联的任务 ID
+        expires_days: 有效期天数（默认 7 天）
+
+    Returns:
+        str: JWT Token 字符串
+    """
+    to_encode = {
+        "sub": username,
+        "uid": user_id,
+        "scope": "task",
+        "task_id": task_id,
+    }
+    expire = datetime.utcnow() + timedelta(days=expires_days)
+    to_encode.update({"exp": expire})
+    return jwt.encode(
+        to_encode,
+        settings.SECRET_KEY,
+        algorithm=settings.ALGORITHM,
+    )
+
+
+def decode_task_token(token: str, task_id: str) -> Optional[dict]:
+    """
+    解码并校验任务 token。
+
+    Args:
+        token: JWT Token 字符串
+        task_id: 期望的任务 ID（用于校验 token 是否属于该任务）
+
+    Returns:
+        Optional[dict]: 解码后的 payload，校验失败返回 None
+    """
+    payload = decode_token(token)
+    if not payload:
+        return None
+    # 必须是 task scope
+    if payload.get("scope") != "task":
+        return None
+    # task_id 必须匹配
+    if payload.get("task_id") != task_id:
+        return None
+    return payload

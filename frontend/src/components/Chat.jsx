@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { askStreamQuestion, submitFeedback, getConversationDetail } from '../api/qa';
+import { askStreamQuestion, submitFeedback, getConversationDetail, getFilterOptions } from '../api/qa';
 import './Chat.css';
 
 // 新会话的初始欢迎消息
@@ -53,6 +53,75 @@ const Chat = ({ conversationId, onConversationChanged, onSidebarToggle }) => {
   const [viewingOwner, setViewingOwner] = useState('');
   // 当前会话标题（显示在 chat-header）
   const [conversationTitle, setConversationTitle] = useState('新会话');
+
+  // 检索过滤条件（level / service / 时间范围）
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [filterLevel, setFilterLevel] = useState('');
+  const [filterService, setFilterService] = useState('');
+  const [filterTimeAfter, setFilterTimeAfter] = useState(''); // datetime-local 字符串
+  const [filterTimeBefore, setFilterTimeBefore] = useState('');
+
+  // 过滤器可选值（从后端动态加载，避免硬编码不匹配真实数据）
+  const [levelOptions, setLevelOptions] = useState([]);
+  const [serviceOptions, setServiceOptions] = useState([]);
+
+  // 组件挂载时拉取过滤器可选值
+  useEffect(() => {
+    (async () => {
+      try {
+        const data = await getFilterOptions();
+        // level 按固定优先级排序（ERROR 优先），其余按字典序
+        const levelOrder = ['ERROR', 'WARNING', 'INFO', 'DEBUG'];
+        const levels = (data.levels || []).slice().sort((a, b) => {
+          const ia = levelOrder.indexOf(a);
+          const ib = levelOrder.indexOf(b);
+          if (ia !== -1 && ib !== -1) return ia - ib;
+          if (ia !== -1) return -1;
+          if (ib !== -1) return 1;
+          return a.localeCompare(b);
+        });
+        setLevelOptions(levels);
+        setServiceOptions(data.services || []);
+      } catch (err) {
+        console.error('加载过滤器选项失败:', err);
+      }
+    })();
+  }, []);
+
+  // 将 datetime-local 字符串（YYYY-MM-DDTHH:MM）转为后端期望的 "YYYY-MM-DD HH:MM:SS"
+  const formatDateTime = (dt) => {
+    if (!dt) return '';
+    // 浏览器 datetime-local 通常给 "YYYY-MM-DDTHH:MM"，补 ":00" 即可
+    const normalized = dt.length === 16 ? `${dt}:00` : dt;
+    return normalized.replace('T', ' ');
+  };
+
+  // 当前已激活的过滤条件数（用于按钮徽标）
+  const activeFilterCount = [
+    filterLevel,
+    filterService,
+    filterTimeAfter,
+    filterTimeBefore,
+  ].filter(Boolean).length;
+
+  // 构造提交给后端的 filters 对象（仅包含非空字段）
+  const buildFiltersPayload = () => {
+    const payload = {};
+    if (filterLevel) payload.level = filterLevel;
+    if (filterService) payload.service = filterService;
+    const after = formatDateTime(filterTimeAfter);
+    const before = formatDateTime(filterTimeBefore);
+    if (after) payload.timestamp_after = after;
+    if (before) payload.timestamp_before = before;
+    return payload;
+  };
+
+  const clearFilters = () => {
+    setFilterLevel('');
+    setFilterService('');
+    setFilterTimeAfter('');
+    setFilterTimeBefore('');
+  };
 
   // 自动滚动到底部
   const scrollToBottom = () => {
@@ -120,10 +189,14 @@ const Chat = ({ conversationId, onConversationChanged, onSidebarToggle }) => {
     setInput('');
     setLoading(true);
 
-    // 2. 流式调用，携带 conversation_id 以支持多轮上下文
+    // 2. 流式调用，携带 conversation_id 以支持多轮上下文，并附带检索过滤条件
     try {
       await askStreamQuestion(
-        { question, conversation_id: conversationId || null },
+        {
+          question,
+          conversation_id: conversationId || null,
+          filters: buildFiltersPayload(),
+        },
         {
           onSource: (data) => {
             setMessages((prev) =>
@@ -237,32 +310,116 @@ const Chat = ({ conversationId, onConversationChanged, onSidebarToggle }) => {
       </div>
 
       <form className="chat-input-area" onSubmit={handleSubmit}>
-        <input
-          ref={inputRef}
-          type="text"
-          className="chat-input"
-          placeholder={
-            viewingOwner && viewingOwner !== user?.username
-              ? '管理员查看模式：不能在此会话中发送消息'
-              : '输入你的问题，例如：数据库连接失败的原因...'
-          }
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          disabled={loading || (!!viewingOwner && viewingOwner !== user?.username)}
-          maxLength={500}
-          autoComplete="off"
-        />
-        <button
-          type="submit"
-          className="chat-send-btn"
-          disabled={
-            !input.trim() ||
-            loading ||
-            (!!viewingOwner && viewingOwner !== user?.username)
-          }
-        >
-          {loading ? '回答中...' : '发送'}
-        </button>
+        {/* 检索过滤面板（折叠/展开） */}
+        <div className="filter-bar">
+          <button
+            type="button"
+            className={`filter-toggle-btn ${filtersOpen ? 'filter-toggle-open' : ''} ${activeFilterCount > 0 ? 'filter-toggle-active' : ''}`}
+            onClick={() => setFiltersOpen((v) => !v)}
+            aria-expanded={filtersOpen}
+            title={filtersOpen ? '收起过滤条件' : '展开过滤条件'}
+          >
+            <span className="filter-toggle-icon">{filtersOpen ? '▾' : '▸'}</span>
+            <span className="filter-toggle-text">过滤</span>
+            {activeFilterCount > 0 && (
+              <span className="filter-count-badge">{activeFilterCount}</span>
+            )}
+          </button>
+          {activeFilterCount > 0 && (
+            <button
+              type="button"
+              className="filter-clear-btn"
+              onClick={clearFilters}
+              title="清空全部过滤条件"
+            >
+              清空
+            </button>
+          )}
+        </div>
+
+        {filtersOpen && (
+          <div className="filter-panel">
+            <div className="filter-row">
+              <label className="filter-field">
+                <span className="filter-label">级别</span>
+                <select
+                  className="filter-select"
+                  value={filterLevel}
+                  onChange={(e) => setFilterLevel(e.target.value)}
+                >
+                  <option value="">全部</option>
+                  {levelOptions.map((lvl) => (
+                    <option key={lvl} value={lvl}>{lvl}</option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="filter-field">
+                <span className="filter-label">服务</span>
+                <select
+                  className="filter-select"
+                  value={filterService}
+                  onChange={(e) => setFilterService(e.target.value)}
+                >
+                  <option value="">全部</option>
+                  {serviceOptions.map((svc) => (
+                    <option key={svc} value={svc}>{svc}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="filter-row">
+              <label className="filter-field">
+                <span className="filter-label">开始时间</span>
+                <input
+                  type="datetime-local"
+                  className="filter-input"
+                  value={filterTimeAfter}
+                  onChange={(e) => setFilterTimeAfter(e.target.value)}
+                />
+              </label>
+              <label className="filter-field">
+                <span className="filter-label">结束时间</span>
+                <input
+                  type="datetime-local"
+                  className="filter-input"
+                  value={filterTimeBefore}
+                  onChange={(e) => setFilterTimeBefore(e.target.value)}
+                />
+              </label>
+            </div>
+          </div>
+        )}
+
+        <div className="chat-input-row">
+          <input
+            ref={inputRef}
+            type="text"
+            className="chat-input"
+            placeholder={
+              viewingOwner && viewingOwner !== user?.username
+                ? '管理员查看模式：不能在此会话中发送消息'
+                : '输入你的问题，例如：数据库连接失败的原因...'
+            }
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={loading || (!!viewingOwner && viewingOwner !== user?.username)}
+            maxLength={500}
+            autoComplete="off"
+          />
+          <button
+            type="submit"
+            className="chat-send-btn"
+            disabled={
+              !input.trim() ||
+              loading ||
+              (!!viewingOwner && viewingOwner !== user?.username)
+            }
+          >
+            {loading ? '回答中...' : '发送'}
+          </button>
+        </div>
       </form>
     </div>
   );
