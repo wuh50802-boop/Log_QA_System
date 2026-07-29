@@ -113,7 +113,34 @@ python services/batch_vectorize.py --rebuild
 - BGE 模型首次会从 ModelScope 下载（约 200MB），缓存到 `backend/models_cache/`。
 - `services/batch_vectorize.py` 支持断点续传，进度记录在 `backend/vectorize_checkpoint.json`。
 
-### 2.4 启动后端
+### 2.4 索引补建（可选）
+
+当上传时未勾选「入库后向量化」，或向量化阶段失败需要续传时，使用 `scripts/rebuild_indexes.py`：
+
+```bash
+# 默认：增量补建向量 + 全量重建 BM25（推荐）
+python scripts/rebuild_indexes.py
+
+# 清空 Qdrant 全量重做向量 + 全量重建 BM25（慎用，会清空已有向量）
+python scripts/rebuild_indexes.py --rebuild-vector
+
+# 只重建 BM25，不补建向量
+python scripts/rebuild_indexes.py --skip-vector
+```
+
+也可通过 API 触发（前端管理页面已集成该按钮）：
+
+```bash
+# mode: vector / bm25 / both（推荐 both）
+curl -X POST http://localhost:8000/api/ingest/rebuild \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"both","rebuild_vector":false}'
+```
+
+> ⚠️ 单独运行 `batch_vectorize` 只补建 Qdrant 向量索引，无法重建 BM25 索引，会导致混合检索的关键词分支无法获取新日志。**务必使用 `rebuild_indexes.py` 或 `POST /api/ingest/rebuild` 同时处理两者。**
+
+### 2.5 启动后端
 
 ```bash
 # 开发模式（热重载）
@@ -351,6 +378,19 @@ location /api/ {
 - `deepseek-v4-pro`：高质量，成本较高
 - `deepseek-v4-flash`：快速，限流宽松，成本较低
 
+### 6.8 BM25 索引过时（关键词检索返回旧/已删除日志）
+
+现象：上传新日志后关键词检索仍命中旧数据，或删除日志后仍能检索到。
+原因：BM25 索引文件 `bm25_index.pkl` 不会自动同步新数据，必须显式重建。
+解决：使用 `python scripts/rebuild_indexes.py`（推荐 `both` 模式）或调用 `POST /api/ingest/rebuild`。
+> ⚠️ 单独运行 `batch_vectorize` 不会重建 BM25 索引，会导致混合检索的关键词分支失效。
+
+### 6.9 Qdrant point_id INVALID_ARGUMENT 错误
+
+现象：向量化时 Qdrant 返回 `INVALID_ARGUMENT`，提示 point_id 不可解析。
+原因：Qdrant 1.7+ 要求 `point_id` 为 UUID 或正整数，原始字符串 ID（如 `log_1_chunk_0`）会被拒绝。
+解决：当前代码已使用 UUID v5（基于 `log_{log_id}_chunk_{chunk_idx}` 命名空间生成）修复，无需手动处理；如遇旧数据残留，运行 `python scripts/rebuild_indexes.py --rebuild-vector` 全量重做。
+
 ---
 
 ## 7. 测试账号
@@ -389,7 +429,8 @@ location /api/ {
 | `backend/app.db` | SQLite 数据库 | 首次启动后端时生成 |
 | `backend/models_cache/` | BGE 模型缓存 | 首次加载 BGE 时生成（约 200MB） |
 | `backend/bm25_index.pkl` | BM25 索引缓存 | 首次构建 BM25 索引时生成 |
-| `backend/vectorize_checkpoint.json` | 向量化断点续传记录 | 运行 `services/batch_vectorize.py` 时生成 |
+| `backend/vectorize_checkpoint.json` | 向量化断点续传记录（last_log_id） | 运行 `services/batch_vectorize.py` 时生成 |
+| `backend/scripts/rebuild_indexes.py` | 索引补建脚本（向量+BM25） | 手动调用 |
 | `frontend/dist/` | 前端构建产物 | 执行 `npm run build` 后生成 |
 | `backend/.env` | 后端环境变量 | 手动创建 |
 | `frontend/.env` | 前端环境变量 | 手动创建 |

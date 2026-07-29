@@ -3,10 +3,12 @@
 > 本文档基于实际代码生成，源文件：
 > - 认证路由：file:///d:/log-qa-system/backend/api/auth.py
 > - 问答路由：file:///d:/log-qa-system/backend/api/qa.py
+> - 摄入路由：file:///d:/log-qa-system/backend/api/ingest.py
 > - 认证 Schema：file:///d:/log-qa-system/backend/schemas/auth.py
 > - 问答 Schema：file:///d:/log-qa-system/backend/schemas/qa.py
 > - 应用入口：file:///d:/log-qa-system/backend/main.py
 > - 前端 SSE 处理：file:///d:/log-qa-system/frontend/src/api/qa.js
+> - 前端摄入处理：file:///d:/log-qa-system/frontend/src/api/ingest.js
 
 ---
 
@@ -1015,3 +1017,243 @@ RAG 路径默认采用 OPT2 实验最优配置，见 file:///d:/log-qa-system/ba
 - **其他问题**（错误诊断、服务健康、用户活动等）→ 走 **RAG** 检索路径（向量 / BM25 / hybrid + LLM 生成）。
 
 两条路径共用 `QAResponse` / SSE 事件协议，前端无需区分处理。
+
+---
+
+## 8. 摄入接口（`/api/ingest`）
+
+> 所有接口仅 admin 可调用。任务异步执行，立即返回 `task_id` + `task_token`（7 天有效，用于轮询任务状态，不受登录 JWT 过期影响）。
+
+### 8.1 POST `/api/ingest/generate` — 生成模拟日志并入库
+
+- 认证：是
+- admin：**是**
+- 权限约束：仅 admin；同一时刻只允许一个摄入任务在跑，否则返回 `409`。
+
+请求体 `GenerateRequest`：
+
+| 字段 | 类型 | 必填 | 约束 | 默认值 | 说明 |
+|------|------|------|------|--------|------|
+| count | int | 否 | 1-100000 | `10000` | 生成日志条数 |
+| vectorize | bool | 否 | - | `true` | 入库后向量化 + 重建 BM25（强制开启，不可关闭） |
+| rebuild_vector | bool | 否 | - | `false` | 是否重建向量索引（清空 Qdrant） |
+
+响应 `TaskAcceptedResponse`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | bool | 固定 `true` |
+| task_id | string | 任务 ID |
+| task_type | string | `"generate"` |
+| message | string | 提示信息 |
+| task_token | string | 任务专用 token（7 天有效），用于轮询 `GET /api/ingest/tasks/{task_id}` |
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/ingest/generate \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"count":10000,"rebuild_vector":true}'
+```
+
+---
+
+### 8.2 POST `/api/ingest/upload` — 上传日志文件并入库
+
+- 认证：是
+- admin：**是**
+- 权限约束：仅 admin；同一时刻只允许一个摄入任务在跑，否则返回 `409`。
+- Content-Type：`multipart/form-data`
+- 文件大小上限：**3 GB**（适配 HDFS Loghub 等大型数据集）
+- 支持的文件后缀：`.csv` / `.log` / `.txt`，否则 `400`
+
+表单参数：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| file | file | 是 | - | 日志文件 |
+| vectorize | bool | 否 | `true` | 入库后向量化 + 重建 BM25 |
+| rebuild_vector | bool | 否 | `false` | 是否重建向量索引（清空 Qdrant） |
+| max_logs | int | 否 | `0` | 上传 `.log` 文件时最多转换的条数（`0`=不限制）；建议先用 10000 测试 |
+
+CSV 字段要求：`timestamp, level, service, ip, message, trace_id`。LOG/TXT 文件会自动识别日志格式并转 CSV（当前支持 HDFS Loghub 格式）。
+
+响应：同 8.1 的 `TaskAcceptedResponse`（`task_type="upload"`）。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/ingest/upload \
+  -H "Authorization: Bearer <admin_token>" \
+  -F "file=@HDFS.log" \
+  -F "max_logs=10000" \
+  -F "vectorize=true"
+```
+
+错误：文件过大 → `413`；文件类型不支持 → `400`；已有任务在跑 → `409`。
+
+---
+
+### 8.3 GET `/api/ingest/tasks/{task_id}` — 查询任务状态
+
+- 认证：是（JWT 或 `task_token` 均可）
+- admin：否（但仅可查询自己触发的任务，除非带 admin JWT）
+- 权限约束：
+  - 携带 admin JWT：可查询任意任务
+  - 携带普通 JWT：只能查询自己触发的任务
+  - 携带 `task_token`：只能查询 `task_token` 对应的任务（适合前端轮询，避免登录 JWT 过期后断流）
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| task_id | string | 任务 ID |
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| task_token | string | 否 | 任务专用 token；与 `Authorization` 二选一 |
+
+响应：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | bool | 固定 `true` |
+| data | object | 任务详情 |
+| data.task_id | string | 任务 ID |
+| data.task_type | string | `"generate"` / `"upload"` / `"rebuild"` |
+| data.status | string | `"pending"` / `"running"` / `"completed"` / `"failed"` / `"cancelled"` |
+| data.progress | float | 0.0 - 1.0 |
+| data.current_step | string | 当前步骤（`parse` / `clean` / `vectorize` / ...） |
+| data.detail | object | 步骤详情（含子步骤、处理量等） |
+| data.error | string \| null | 失败原因 |
+| data.created_at | string | 创建时间（ISO） |
+| data.updated_at | string | 最近更新时间（ISO） |
+
+---
+
+### 8.4 GET `/api/ingest/tasks` — 列出最近任务
+
+- 认证：是
+- admin：**是**
+- 权限约束：仅 admin；返回最近 N 个任务（默认 20）。
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| limit | int | 否 | `20` | 返回任务数量上限 |
+
+响应：`{ "success": true, "items": [...] }`（item 结构同 8.3 的 `data`）。
+
+---
+
+### 8.5 POST `/api/ingest/tasks/{task_id}/cancel` — 取消运行中的任务
+
+- 认证：是
+- admin：**是**
+- 权限约束：仅 admin；任务不存在或已结束返回 `success=false`（不抛 4xx）。
+
+**协作式取消**：服务端只标记取消请求，流水线在下一个批次检测到标记后自行停止，因此取消后任务可能还会运行一小段时间（当前批次结束）。
+
+路径参数：
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| task_id | string | 任务 ID |
+
+响应：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | bool | 是否成功标记取消 |
+| detail | string | 提示信息 |
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/ingest/tasks/task_xxx/cancel \
+  -H "Authorization: Bearer <admin_token>"
+```
+
+```json
+{ "success": true, "detail": "取消请求已发送，任务将在当前批次完成后停止" }
+```
+
+---
+
+### 8.6 POST `/api/ingest/rebuild` — 补建索引
+
+- 认证：是
+- admin：**是**
+- 权限约束：仅 admin；同一时刻只允许一个摄入/重建任务在跑，否则返回 `409`。
+
+适用场景：
+- 上传时未勾选「入库后向量化」，事后补建索引
+- 向量化阶段失败，从检查点续传
+- BM25 索引未构建或过时，全量重建
+
+请求体 `RebuildRequest`：
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| mode | string | 否 | `"both"` | 重建模式：`vector` / `bm25` / `both` |
+| rebuild_vector | bool | 否 | `false` | `true`=清空 Qdrant 全量重做（慎用）；`false`=从 `last_log_id` 检查点增量续传 |
+
+`mode` 含义：
+
+| 值 | 行为 |
+|----|------|
+| `vector` | 增量补建 Qdrant 向量索引（从 `last_log_id` 检查点续传） |
+| `bm25` | 从 DB 全量重建 BM25 索引 |
+| `both` | 先补建向量索引，再重建 BM25（**推荐**：单独跑 `vector` 会导致 BM25 索引过时） |
+
+响应：同 8.1 的 `TaskAcceptedResponse`（`task_type="rebuild"`）。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/ingest/rebuild \
+  -H "Authorization: Bearer <admin_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"both","rebuild_vector":false}'
+```
+
+错误：无效 `mode` → `400`；已有任务在跑 → `409`。
+
+> ⚠️ 单独运行 `scripts/batch_vectorize.py` 只补建 Qdrant 向量索引，不会重建 BM25 索引，会导致混合检索的关键词分支无法获取新日志。推荐使用 `POST /api/ingest/rebuild` 或 `scripts/rebuild_indexes.py`。
+
+---
+
+### 8.7 GET `/api/ingest/stats` — 数据库与向量库统计
+
+- 认证：是
+- admin：**是**
+
+响应：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | bool | 固定 `true` |
+| data | object | 统计数据 |
+| data.total_logs | int | SQLite 日志总数 |
+| data.by_level | object | 按级别分布，如 `{"ERROR": 100, "INFO": 5000}` |
+| data.by_service | object | 按服务分布 |
+| data.last_ingest_at | string \| null | 最近入库时间 |
+| data.qdrant_total | int | Qdrant 向量总数 |
+
+---
+
+### 8.8 GET `/api/ingest/formats` — 支持的日志格式
+
+- 认证：是
+- admin：**是**
+
+响应：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| success | bool | 固定 `true` |
+| data | object[] | 格式列表，每项含 `extension` / `description` / `required_fields` |

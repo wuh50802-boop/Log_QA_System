@@ -189,9 +189,11 @@ npm run dev
 | POST | `/api/qa/feedback` | 点赞 / 点踩反馈 |
 | GET  | `/api/qa/feedback/stats` | 反馈统计（支持 scope=me/all） |
 | POST | `/api/ingest/generate` | 生成模拟日志并入库（仅 admin） |
-| POST | `/api/ingest/upload` | 上传日志文件并入库（仅 admin） |
+| POST | `/api/ingest/upload` | 上传日志文件并入库（仅 admin，上限 3GB） |
 | GET  | `/api/ingest/tasks/{task_id}` | 查询摄入任务状态 |
 | GET  | `/api/ingest/tasks` | 列出最近摄入任务 |
+| POST | `/api/ingest/tasks/{task_id}/cancel` | 取消运行中的摄入任务（仅 admin） |
+| POST | `/api/ingest/rebuild` | 补建向量索引 / 重建 BM25 索引（仅 admin） |
 | GET  | `/api/ingest/stats` | 数据库 + 向量库统计 |
 | GET  | `/api/ingest/formats` | 支持的日志格式列表 |
 
@@ -234,10 +236,22 @@ SQLite 数据库（`backend/app.db`）包含以下核心表：
 系统支持多种日志数据来源：
 
 - **模拟生成**：通过 `scripts/generate_logs.py` 或管理端 `/api/ingest/generate` 生成合成日志（可指定条数，上限 10 万条）
-- **文件上传**：支持 CSV、LOG、TXT 格式（上限 200MB），管理端 `/api/ingest/upload` 或 `scripts/import_logs.py`
+- **文件上传**：支持 CSV、LOG、TXT 格式（上限 3GB，适配 HDFS Loghub 等大数据集），管理端 `/api/ingest/upload` 或 `scripts/import_logs.py`
 - **HDFS 数据集**：`backend/datasets/HDFS_v1/` 包含 HDFS 开源日志数据集（原始 + 预处理），可通过 `scripts/import_hdfs.py` 导入
 
-摄入流程统一为：原始文件 → LogParser 解析 → LogCleaner 清洗 → Chunker 分块（500 字符，50 重叠） → BGE 向量化 → 写入 Qdrant + SQLite。
+摄入流程统一为：原始文件 → LogParser 解析 → LogCleaner 清洗 → Chunker 分块（500 字符，50 重叠） → BGE 向量化 → 写入 Qdrant + SQLite → BM25 索引重建。
+
+### 索引补建
+
+当上传时未勾选「入库后向量化」，或向量化阶段失败时，可补建索引：
+
+- **API**：`POST /api/ingest/rebuild`，支持三种模式：
+  - `mode=vector` — 增量补建 Qdrant 向量索引（从 `last_log_id` 检查点续传）
+  - `mode=bm25` — 从 DB 全量重建 BM25 索引
+  - `mode=both` — 两者都做（推荐，单独跑 `vector` 会导致 BM25 索引过时）
+- **脚本**：`scripts/rebuild_indexes.py`，参数同上，另支持 `--rebuild-vector`（清空 Qdrant 全量重做，慎用）
+
+> ⚠️ 单独运行 `batch_vectorize` 只补建 Qdrant 向量索引，无法重建 BM25 索引，会导致混合检索的关键词分支无法获取新日志，推荐使用 `rebuild_indexes.py` 或调用 `POST /api/ingest/rebuild`。
 
 ## 评估
 
@@ -275,8 +289,8 @@ python -m evaluation.scripts.eval_split          # 分路径评估
 - admin 不能修改自己的角色
 - 用户不能删除自己；最后一个 admin 不能被删除
 - 前端注册固定为 user 角色，注册接口的 role 参数被忽略
-- 日志摄入接口仅 admin 可用，上传文件限 .csv / .log / .txt，大小上限 200MB
-- 摄入任务支持 task_token 鉴权，非 admin 用户仅可查询自己触发的任务
+- 日志摄入接口仅 admin 可用，上传文件限 .csv / .log / .txt，大小上限 3GB
+- 摄入任务支持 task_token 鉴权（7 天有效），非 admin 用户仅可查询自己触发的任务
 - 错误响应统一返回 200 + `success=false`，不抛 5xx
 
 ## 文档

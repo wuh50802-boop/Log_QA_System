@@ -468,7 +468,7 @@ class QAPipeline:
             response = self.llm_client.chat(
                 messages,
                 temperature=0.3,
-                max_tokens=500  # 稍微增加，以支持完整回答
+                max_tokens=1024  # 保证长回答不被截断
             )
             llm_time = time.time() - llm_start
             answer = response.content

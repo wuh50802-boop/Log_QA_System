@@ -25,7 +25,7 @@ class DeepSeekConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     timeout: float = 30.0  # 降低超时时间
-    max_tokens: int = 600  # 降低默认值，日志回答通常不需要太长
+    max_tokens: int = 1024  # 保证长回答不被截断
     temperature: float = 0.3  # 降低温度，更确定性
 
 
