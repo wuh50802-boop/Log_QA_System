@@ -1,4 +1,5 @@
 #日志清洗模块
+import hashlib
 import re
 from typing import List, Dict, Set, Tuple
 
@@ -165,7 +166,8 @@ class LogCleaner:
     @classmethod
     def deduplicate(cls, logs: List[Dict]) -> Tuple[List[Dict], int]:
         """
-        去重：根据 (timestamp, level, service, message) 组合去重
+        去重：根据 (timestamp, level, service, message) 组合的哈希摘要去重。
+        使用 MD5 摘要代替原始元组，大幅降低大数据集内存占用。
         
         Args:
             logs: 日志列表
@@ -173,18 +175,19 @@ class LogCleaner:
         Returns:
             (去重后的日志列表, 删除的重复数量)
         """
-        seen: Set[Tuple[str, str, str, str]] = set()
+        seen: Set[bytes] = set()
         unique_logs = []
         duplicate_count = 0
         
         for log in logs:
-            # 构造唯一键
-            key = (
+            # 构造唯一键的哈希摘要（16 bytes vs 原始字符串元组）
+            raw = "|".join((
                 log.get("timestamp", ""),
                 log.get("level", ""),
                 log.get("service", ""),
                 log.get("message", ""),
-            )
+            ))
+            key = hashlib.md5(raw.encode("utf-8", errors="replace")).digest()
             
             if key not in seen:
                 seen.add(key)

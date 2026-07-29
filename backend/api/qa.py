@@ -238,6 +238,7 @@ def ask(
             sources=json.dumps(
                 [ref.to_dict() for ref in result.source_refs],
                 ensure_ascii=False,
+                default=str,
             ) if result.source_refs else None,
             feedback=FeedbackType.NONE,
             conversation_id=conversation_id,
@@ -305,7 +306,8 @@ def ask(
 def _sse_event(event: str, data: dict) -> str:
     """格式化一个 SSE 事件"""
     # data 用 JSON 字符串，每个 SSE 行以 "data: " 前缀
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    # default 处理 datetime 等不可直接序列化的类型（来源日志的 timestamp 可能为 datetime 对象）
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
 @router.post("/ask/stream", summary="流式问答 (SSE)")
@@ -423,7 +425,7 @@ def ask_stream(
                 user_id=current_user.id,
                 question=request.question,
                 answer=full_answer,
-                sources=json.dumps(source_refs_data, ensure_ascii=False)
+                sources=json.dumps(source_refs_data, ensure_ascii=False, default=str)
                 if source_refs_data
                 else None,
                 feedback=FeedbackType.NONE,

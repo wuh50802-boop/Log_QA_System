@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { getConversations, deleteConversation, getFeedbackStats } from '../api/qa';
+import { getConversations, deleteConversation } from '../api/qa';
 import './ConversationSidebar.css';
 
 const ConversationSidebar = ({
@@ -20,12 +20,6 @@ const ConversationSidebar = ({
   // 用户菜单展开状态
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef(null);
-
-  // 反馈统计面板状态
-  const [statsOpen, setStatsOpen] = useState(false);
-  const [statsLoading, setStatsLoading] = useState(false);
-  const [statsData, setStatsData] = useState(null);
-  const [statsScope, setStatsScope] = useState('me');
 
   const isAdmin = user?.role === 'admin';
 
@@ -132,36 +126,9 @@ const ConversationSidebar = ({
     logout();
   };
 
-  // 反馈统计
-  const loadStats = async (scope) => {
-    setStatsLoading(true);
-    try {
-      const data = await getFeedbackStats({ scope });
-      setStatsData(data);
-    } catch (err) {
-      console.error('加载反馈统计失败:', err);
-    } finally {
-      setStatsLoading(false);
-    }
-  };
-
-  const handleOpenStats = () => {
+  const handleFeedbackNav = () => {
     setUserMenuOpen(false);
     onClose?.();
-    setStatsOpen(true);
-    loadStats(statsScope);
-  };
-
-  const handleSwitchScope = (newScope) => {
-    if (newScope === statsScope) return;
-    setStatsScope(newScope);
-    loadStats(newScope);
-  };
-
-  const handleJumpToConversation = (convId) => {
-    if (!convId) return;
-    setStatsOpen(false);
-    onSelect?.(convId);
   };
 
   // 用户名首字母作为头像
@@ -244,13 +211,13 @@ const ConversationSidebar = ({
 
         {userMenuOpen && (
           <div className="conv-user-menu">
-            <button
-              type="button"
+            <Link
+              to="/feedback"
               className="conv-menu-item"
-              onClick={handleOpenStats}
+              onClick={handleFeedbackNav}
             >
               反馈统计
-            </button>
+            </Link>
             <button
               type="button"
               className="conv-menu-item"
@@ -285,141 +252,6 @@ const ConversationSidebar = ({
               退出登录
             </button>
           </div>
-        )}
-      </div>
-
-      {/* 反馈统计面板（在 sidebar 末层渲染，遮罩全屏） */}
-      {statsOpen && (
-        <FeedbackStatsPanel
-          loading={statsLoading}
-          data={statsData}
-          scope={statsScope}
-          isAdmin={isAdmin}
-          onClose={() => setStatsOpen(false)}
-          onRefresh={() => loadStats(statsScope)}
-          onSwitchScope={handleSwitchScope}
-          onJumpToConversation={handleJumpToConversation}
-        />
-      )}
-    </div>
-  );
-};
-
-// ============================================================
-// 反馈统计面板组件
-// ============================================================
-const FeedbackStatsPanel = ({
-  loading,
-  data,
-  scope,
-  isAdmin,
-  onClose,
-  onRefresh,
-  onSwitchScope,
-  onJumpToConversation,
-}) => {
-  const likeRate = data?.like_rate ?? 0;
-  const likeRatePct = (likeRate * 100).toFixed(1);
-  const totalRated = (data?.total_likes ?? 0) + (data?.total_dislikes ?? 0);
-  const showAll = data?.scope === 'all';
-
-  return (
-    <div className="stats-overlay" onClick={onClose}>
-      <div className="stats-panel" onClick={(e) => e.stopPropagation()}>
-        <div className="stats-header">
-          <h3>反馈统计{showAll ? '（全平台）' : '（我的）'}</h3>
-          <div className="stats-actions">
-            {isAdmin && (
-              <div className="stats-scope-toggle">
-                <button
-                  className={`stats-scope-btn ${scope === 'me' ? 'active' : ''}`}
-                  onClick={() => onSwitchScope('me')}
-                  disabled={loading}
-                >
-                  我的
-                </button>
-                <button
-                  className={`stats-scope-btn ${scope === 'all' ? 'active' : ''}`}
-                  onClick={() => onSwitchScope('all')}
-                  disabled={loading}
-                >
-                  全平台
-                </button>
-              </div>
-            )}
-            <button className="stats-refresh-btn" onClick={onRefresh} disabled={loading} title="刷新">
-              {loading ? '加载中' : '刷新'}
-            </button>
-            <button className="stats-close-btn" onClick={onClose} title="关闭">
-              关闭
-            </button>
-          </div>
-        </div>
-
-        {loading && !data ? (
-          <div className="stats-loading">加载中...</div>
-        ) : !data ? (
-          <div className="stats-empty">暂无数据</div>
-        ) : (
-          <>
-            <div className="stats-cards">
-              <div className="stat-card">
-                <div className="stat-value">{data.total_qa ?? 0}</div>
-                <div className="stat-label">总问答数</div>
-              </div>
-              <div className="stat-card stat-card-like">
-                <div className="stat-value">{data.total_likes ?? 0}</div>
-                <div className="stat-label">点赞数</div>
-              </div>
-              <div className="stat-card stat-card-dislike">
-                <div className="stat-value">{data.total_dislikes ?? 0}</div>
-                <div className="stat-label">点踩数</div>
-              </div>
-              <div className="stat-card stat-card-rate">
-                <div className="stat-value">{likeRatePct}%</div>
-                <div className="stat-label">好评率 ({totalRated} 评价)</div>
-              </div>
-            </div>
-
-            <div className="stats-section">
-              <h4>差评问题 Top 10</h4>
-              {(!data.top_disliked || data.top_disliked.length === 0) ? (
-                <div className="stats-empty-list">暂无差评记录</div>
-              ) : (
-                <div className="stats-disliked-list">
-                  {data.top_disliked.map((item) => (
-                    <div
-                      key={item.qa_id}
-                      className={`disliked-item ${item.conversation_id ? 'clickable' : ''}`}
-                      onClick={() =>
-                        item.conversation_id && onJumpToConversation(item.conversation_id)
-                      }
-                      title={
-                        item.conversation_id
-                          ? '点击跳转到原会话查看完整上下文'
-                          : '该问答无关联会话'
-                      }
-                    >
-                      <div className="disliked-question">
-                        <span className="disliked-badge">!</span>
-                        <span className="disliked-q-text">{item.question}</span>
-                      </div>
-                      <div className="disliked-answer">{item.answer}</div>
-                      <div className="disliked-meta">
-                        <span className="disliked-time">{item.created_at}</span>
-                        {showAll && item.username && (
-                          <span className="disliked-username">{item.username}</span>
-                        )}
-                        {item.conversation_id && (
-                          <span className="disliked-jump-hint">查看会话</span>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </>
         )}
       </div>
     </div>

@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def rebuild_vector_index(rebuild: bool = False):
     """增量向量化（或全量重建）"""
-    from scripts.batch_vectorize import batch_vectorize
+    from services.batch_vectorize import batch_vectorize
 
     logger.info("=" * 60)
     logger.info("🚀 Step 1: 向量索引补建")
@@ -41,8 +41,8 @@ def rebuild_vector_index(rebuild: bool = False):
 
     t0 = time.time()
     batch_vectorize(
-        batch_size=100,
-        vector_batch_size=20,
+        batch_size=1024,      # DB 读取批次（与本地/云端无关，看 DB IO）
+        vector_batch_size=512,  # 本地部署无网络瓶颈，加大减少 upsert 请求次数
         resume=not rebuild,   # rebuild=True 时忽略检查点全量重做
         rebuild=rebuild,
     )
@@ -50,9 +50,9 @@ def rebuild_vector_index(rebuild: bool = False):
 
 
 def rebuild_bm25_index():
-    """从 DB 全量重建 BM25 索引"""
-    from core.database import SessionLocal
-    from models.log import Log
+    """从 DB 全量重建 BM25 索引（流式加载，避免一次性加载千万级 ORM 对象）"""
+    from sqlalchemy import select, text
+    from core.database import SessionLocal, engine
     import services.bm25_retriever as bm25_module
     from services.bm25_retriever import get_bm25_retriever
 
@@ -65,21 +65,75 @@ def rebuild_bm25_index():
     # （get_bm25_retriever 在单例已存在时会直接返回旧实例，不会重建）
     bm25_module._bm25_retriever = None
 
-    with SessionLocal() as sess:
-        all_logs = sess.query(Log).order_by(Log.id).all()
+    # 先统计总数用于进度显示
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM logs")).scalar()
+    logger.info(f"📊 待索引日志数: {total}")
 
-    corpus = [{
-        "log_id": lg.id,
-        "level": lg.level,
-        "service": lg.service,
-        "timestamp": lg.timestamp,
-        "message": lg.message,
-        "chunk_text": lg.message,
-        "source": lg.service,
-    } for lg in all_logs]
+    # 流式加载：用 Core select 只取必要字段，yield_per 避免 ORM 一次性物化全部对象
+    # 直接用 raw connection 的 fetchmany 拿 dict，比 ORM 快 5-10 倍
+    corpus = []
+    processed = 0
+    batch_size = 50000
+    with engine.connect() as conn:
+        # SQLite 下 ORDER BY id 保证顺序稳定；只取 BM25 需要的 5 个字段
+        result = conn.execution_options(stream_results=True).execute(
+            text("SELECT id, level, service, timestamp, message FROM logs ORDER BY id")
+        )
+        while True:
+            rows = result.fetchmany(batch_size)
+            if not rows:
+                break
+            for row in rows:
+                corpus.append({
+                    "log_id": row[0],
+                    "level": row[1],
+                    "service": row[2],
+                    "timestamp": str(row[3]),
+                    "message": row[4],
+                    "chunk_text": row[4],
+                    "source": row[2],
+                })
+            processed += len(rows)
+            elapsed = time.time() - t0
+            speed = processed / elapsed if elapsed > 0 else 0
+            logger.info(
+                f"📥 加载进度: {processed}/{total} ({processed/total*100:.1f}%) | "
+                f"速度: {speed:.0f} rows/s"
+            )
 
-    get_bm25_retriever(corpus=corpus, cache_path="./bm25_index.pkl")
-    logger.info(f"✅ BM25 索引重建完成: {len(corpus)} 条文档，耗时 {time.time() - t0:.1f}s")
+    logger.info(f"📦 加载完成：{len(corpus)} 条原始日志")
+
+    # ---- 模板去重：相同结构的日志只保留一条，避免 BM25Okapi 内存爆炸 ----
+    # rank_bm25 是纯 Python 实现，对 1033 万文档会 MemoryError（需 8GB+ 内存）
+    # HDFS 日志高度重复，模板去重后通常只剩几万条独立模板
+    from services.batch_vectorize import normalize_template
+
+    logger.info("🔧 开始模板去重...")
+    dedup_start = time.time()
+    seen_templates = {}  # template -> corpus item
+    for doc in corpus:
+        msg = doc.get('message', '') or doc.get('chunk_text', '')
+        template = normalize_template(msg)
+        if template not in seen_templates:
+            seen_templates[template] = doc
+    dedup_corpus = list(seen_templates.values())
+    dedup_ratio = (1 - len(dedup_corpus) / len(corpus)) * 100
+    logger.info(
+        f"✅ 模板去重完成: {len(corpus)} → {len(dedup_corpus)} 条 "
+        f"(去重率 {dedup_ratio:.1f}%)，耗时 {time.time() - dedup_start:.1f}s"
+    )
+
+    # 释放原始语料库内存
+    del corpus, seen_templates
+
+    logger.info(f"📦 开始构建 BM25 索引（{len(dedup_corpus)} 条模板文档）...")
+    original_count = total  # 原始日志数，从外部变量保留
+    get_bm25_retriever(corpus=dedup_corpus, cache_path="./bm25_index.pkl")
+    logger.info(
+        f"✅ BM25 索引重建完成: 原始 {original_count} 条 → "
+        f"模板 {len(dedup_corpus)} 条，总耗时 {time.time() - t0:.1f}s"
+    )
 
 
 def main():

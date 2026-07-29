@@ -3,13 +3,21 @@
 
 设计说明：
 - 毕设单机部署场景，不引入 Celery/Redis
-- 任务状态存内存，进程重启后丢失（可接受，入库任务频率低）
+- 任务状态存内存 + JSON 文件持久化，进程重启后自动恢复历史
 - 同时只允许一个入库任务运行（_running_lock 互斥）
 """
+import json
+import logging
+import os
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# 持久化文件路径（与 app.db 同目录）
+_TASKS_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tasks_history.json")
 
 
 # 任务状态枚举
@@ -69,7 +77,7 @@ class TaskState:
 
 
 class InMemoryTaskStore:
-    """线程安全的内存任务池"""
+    """线程安全的内存任务池（带 JSON 文件持久化）"""
 
     def __init__(self, max_history: int = 50):
         self._tasks: Dict[str, TaskState] = {}
@@ -78,6 +86,58 @@ class InMemoryTaskStore:
         # 同时只允许一个入库任务运行
         self._running_lock = threading.Lock()
         self._running_task_id: Optional[str] = None
+        # 取消请求集合（协作式取消）
+        self._cancel_requested: set = set()
+        # 启动时从文件恢复历史
+        self._load()
+
+    # ---------- 持久化 ----------
+
+    def _save(self):
+        """将当前任务列表写入 JSON 文件（调用方需持有 _lock）"""
+        try:
+            data = [t.to_dict() for t in self._tasks.values()]
+            with open(_TASKS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"任务历史持久化写入失败: {e}")
+
+    def _load(self):
+        """从 JSON 文件恢复任务历史"""
+        if not os.path.exists(_TASKS_FILE):
+            return
+        try:
+            with open(_TASKS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            for item in data:
+                steps = {}
+                for name, sp_data in (item.get("steps") or {}).items():
+                    steps[name] = StepProgress(
+                        status=sp_data.get("status", "pending"),
+                        detail=sp_data.get("detail", {}),
+                        duration_sec=sp_data.get("duration_sec"),
+                    )
+                task = TaskState(
+                    task_id=item["task_id"],
+                    task_type=item.get("task_type", "generate"),
+                    status=item.get("status", "done"),
+                    current_step=item.get("current_step"),
+                    steps=steps,
+                    started_at=item.get("started_at"),
+                    updated_at=item.get("updated_at"),
+                    finished_at=item.get("finished_at"),
+                    error=item.get("error"),
+                    artifacts=item.get("artifacts", {}),
+                )
+                # 进程重启后，之前 running/pending 的任务标记为 failed
+                if task.status in (STATUS_RUNNING, STATUS_PENDING):
+                    task.status = STATUS_FAILED
+                    task.error = "服务重启，任务中断"
+                    task.finished_at = datetime.now().isoformat(timespec="seconds")
+                self._tasks[task.task_id] = task
+            logger.info(f"从文件恢复 {len(self._tasks)} 条任务历史")
+        except Exception as e:
+            logger.warning(f"任务历史恢复失败: {e}")
 
     # ---------- 任务生命周期 ----------
 
@@ -94,6 +154,7 @@ class InMemoryTaskStore:
             )
             self._tasks[task_id] = task
             self._evict_if_needed()
+            self._save()
             return task
 
     def try_start(self, task_id: str) -> bool:
@@ -108,6 +169,7 @@ class InMemoryTaskStore:
             if task:
                 task.status = STATUS_RUNNING
                 task.updated_at = datetime.now().isoformat(timespec="seconds")
+            self._save()
             return True
 
     def update(self, task_id: str, **fields):
@@ -120,6 +182,7 @@ class InMemoryTaskStore:
                 if hasattr(task, k):
                     setattr(task, k, v)
             task.updated_at = datetime.now().isoformat(timespec="seconds")
+            self._save()
 
     def update_step(self, task_id: str, step_name: str,
                     status: Optional[str] = None,
@@ -147,6 +210,7 @@ class InMemoryTaskStore:
             if status in ("running", "done", "failed") and task.current_step != step_name:
                 task.current_step = step_name
             task.updated_at = datetime.now().isoformat(timespec="seconds")
+            self._save()
 
     def finish(self, task_id: str, success: bool, error: Optional[str] = None):
         """结束任务（成功或失败）"""
@@ -160,6 +224,26 @@ class InMemoryTaskStore:
             task.updated_at = task.finished_at
             if self._running_task_id == task_id:
                 self._running_task_id = None
+            self._save()
+
+    # ---------- 取消 ----------
+
+    def request_cancel(self, task_id: str) -> bool:
+        """请求取消任务（协作式：流水线循环检测后自行退出）"""
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or task.status not in (STATUS_RUNNING, STATUS_PENDING):
+                return False
+            self._cancel_requested.add(task_id)
+            return True
+
+    def is_cancel_requested(self, task_id: str) -> bool:
+        """流水线内部调用：检测是否收到取消请求"""
+        return task_id in self._cancel_requested
+
+    def clear_cancel(self, task_id: str):
+        """任务结束后清理取消标记"""
+        self._cancel_requested.discard(task_id)
 
     # ---------- 查询 ----------
 
@@ -200,6 +284,7 @@ class InMemoryTaskStore:
         excess = len(self._tasks) - self._max_history
         for t in candidates[:excess]:
             self._tasks.pop(t.task_id, None)
+        # 注意：_evict_if_needed 仅在 create() 内调用，create() 末尾已统一 _save()
 
 
 # 全局单例

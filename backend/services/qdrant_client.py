@@ -114,16 +114,22 @@ class QdrantClientWrapper:
         self.collection_name = os.getenv("COLLECTION_NAME", "log_vectors")
         self.vector_size = int(os.getenv("VECTOR_SIZE", 768))
 
-        if not self.url or not self.api_key:
-            raise QdrantFatalError("QDRANT_URL and QDRANT_API_KEY must be set in .env")
+        if not self.url:
+            raise QdrantFatalError("QDRANT_URL must be set in .env")
+
+        # 本地部署（localhost / 127.0.0.1）不需要 API_KEY
+        # 云端部署必须提供 API_KEY
+        is_local = "localhost" in self.url or "127.0.0.1" in self.url
+        if not is_local and not self.api_key:
+            raise QdrantFatalError("QDRANT_API_KEY must be set for cloud deployment")
 
         self.client = QdrantClient(
             url=self.url,
-            api_key=self.api_key,
+            api_key=self.api_key if not is_local else None,
             timeout=120,          # 增加超时
             prefer_grpc=True,     # 启用 gRPC 提升性能
         )
-        logger.info(f"✅ Qdrant client initialized for {self.url}")
+        logger.info(f"✅ Qdrant client initialized for {self.url} ({'local' if is_local else 'cloud'})")
 
     @retry_on_failure(max_retries=3, delay=2, backoff=2)
     def health_check(self) -> bool:
@@ -223,13 +229,16 @@ class QdrantClientWrapper:
     def upsert_vectors(
         self,
         points: List[PointStruct],
-        batch_size: int = 20,
+        batch_size: int = 64,
         wait: bool = True,
     ) -> bool:
         """
         批量插入向量点（带重试）
 
         Args:
+            batch_size: 单次 upsert 请求的 point 数（默认 64）。
+                768 维向量 + payload ≈ 3.5KB/point，64 个 ≈ 224KB/请求，
+                远低于 Qdrant 默认 payload 限制；wait=False 下失败重试代价可控。
             wait: 是否等待服务端写入完成。
                 批量导入时设 wait=False 可大幅提升吞吐（跳过每批的确认往返）。
         """
@@ -274,36 +283,118 @@ class QdrantClientWrapper:
             logger.error(f"❌ 更新 indexing_threshold 失败: {e}")
             return False
 
-    def wait_for_indexing(self, timeout: int = 600) -> bool:
+    def wait_for_indexing(self, timeout: int = 3600) -> bool:
         """
         轮询等待后台索引构建完成（indexed_count 达到 vectors_count 并稳定）。
 
         用于批量导入完成后等待 Qdrant 把刚写入的向量构建成 HNSW 索引。
+
+        分两阶段：
+            1. 等待优化器启动（indexed > 0 或 status 变为 yellow/green），最多 120s
+            2. 等待索引构建完成，连续 6 次（60s）无变化才认为稳定
+
+        千万级向量 HNSW 构建可能需要 20-60 分钟，timeout 默认 1 小时。
         """
+        # 显式设置优化线程数，激活后台优化器
+        # （Qdrant 默认 max_optimization_threads=None 时可能不主动启动优化）
+        try:
+            from qdrant_client.http.models import OptimizersConfigDiff
+            self.client.update_collection(
+                collection_name=self.collection_name,
+                optimizer_config=OptimizersConfigDiff(
+                    indexing_threshold=10000,
+                    max_optimization_threads=2,
+                ),
+            )
+            logger.info("🔧 已设置 max_optimization_threads=2，激活后台索引构建")
+        except Exception as e:
+            logger.warning(f"设置优化线程失败（不影响索引构建）: {e}")
+
         start = time.time()
         last_indexed = -1
         stable_count = 0
+        optimizer_started = False
+        last_log_time = 0
+
+        # 阶段 1：等待优化器启动（最多 120 秒）
+        logger.info("⏳ 等待优化器启动...")
+        while time.time() - start < min(120, timeout):
+            try:
+                info = self.client.get_collection(self.collection_name)
+                vectors_count = getattr(info, 'vectors_count', getattr(info, 'points_count', 0)) or 0
+                indexed_count = getattr(info, 'indexed_vectors_count', getattr(info, 'indexed_points_count', 0)) or 0
+                status = str(getattr(info, 'status', ''))
+
+                if indexed_count > 0 or status in ('yellow', 'green'):
+                    optimizer_started = True
+                    logger.info(f"✅ 优化器已启动 (indexed={indexed_count:,}, status={status})")
+                    break
+            except Exception as e:
+                logger.warning(f"查询索引状态失败: {e}")
+            time.sleep(5)
+
+        if not optimizer_started:
+            # 120 秒内优化器未启动，但数据量可能很小（已建完），检查一次
+            info = self.client.get_collection(self.collection_name)
+            vectors_count = getattr(info, 'vectors_count', getattr(info, 'points_count', 0)) or 0
+            indexed_count = getattr(info, 'indexed_vectors_count', getattr(info, 'indexed_points_count', 0)) or 0
+            if indexed_count >= vectors_count and vectors_count > 0:
+                logger.info("✅ 索引已就绪（数据量小，构建瞬间完成）")
+                return True
+            logger.warning("⚠️ 优化器 120s 内未启动，继续等待...")
+
+        # 阶段 2：等待索引构建完成
+        logger.info(f"⏳ 等待索引构建完成（超时 {timeout}s）...")
+        last_indexed = -1
+        stable_count = 0
+        phase2_start = time.time()
+
         while time.time() - start < timeout:
             try:
                 info = self.client.get_collection(self.collection_name)
                 vectors_count = getattr(info, 'vectors_count', getattr(info, 'points_count', 0)) or 0
                 indexed_count = getattr(info, 'indexed_vectors_count', getattr(info, 'indexed_points_count', 0)) or 0
-                logger.info(f"⏳ 索引进度: {indexed_count}/{vectors_count}")
-                if vectors_count > 0 and indexed_count >= vectors_count:
+                status = str(getattr(info, 'status', ''))
+
+                # 完成条件：indexed >= total 且状态为 green
+                if vectors_count > 0 and indexed_count >= vectors_count and status == 'green':
+                    logger.info(f"✅ HNSW 索引构建完成: {indexed_count:,}/{vectors_count:,}")
                     return True
-                # 连续 3 次索引数未变化，认为构建已稳定（可能部分段未达 indexing_threshold）
-                if indexed_count == last_indexed:
+
+                # 每 30 秒打印一次进度（避免日志刷屏）
+                now = time.time()
+                if now - last_log_time >= 30:
+                    pct = indexed_count / vectors_count * 100 if vectors_count > 0 else 0
+                    speed = (indexed_count - last_indexed) / (now - phase2_start) if last_indexed >= 0 and now > phase2_start else 0
+                    logger.info(
+                        f"⏳ 索引进度: {indexed_count:,}/{vectors_count:,} ({pct:.1f}%) "
+                        f"| status={status} | speed≈{speed:,.0f}/s"
+                    )
+                    last_log_time = now
+
+                # 稳定性判断：连续 6 次（60 秒）无变化才认为停止
+                # 必须在优化器已启动且 indexed > 0 之后才开始计数，
+                # 避免优化器还没开始就被误判为"完成"
+                if indexed_count == last_indexed and indexed_count > 0:
                     stable_count += 1
-                    if stable_count >= 3:
-                        logger.warning("⚠️ 索引数连续 3 次未变化，认为已稳定，停止等待")
-                        return True
+                    if stable_count >= 6:
+                        if indexed_count >= vectors_count:
+                            logger.info(f"✅ 索引构建完成（稳定）: {indexed_count:,}/{vectors_count:,}")
+                            return True
+                        else:
+                            logger.warning(
+                                f"⚠️ 索引数连续 60s 未变化 ({indexed_count:,}/{vectors_count:,})，"
+                                f"可能部分 segment 未达阈值，停止等待"
+                            )
+                            return True
                 else:
                     stable_count = 0
                 last_indexed = indexed_count
             except Exception as e:
                 logger.warning(f"查询索引状态失败: {e}")
-            time.sleep(5)
-        logger.warning(f"⚠️ 等待索引超时 ({timeout}s)")
+            time.sleep(10)
+
+        logger.warning(f"⚠️ 等待索引超时 ({timeout}s)，索引可能仍在后台构建")
         return False
 
     @retry_on_failure(max_retries=2, delay=1, backoff=2)

@@ -35,8 +35,8 @@ from services.ingest_service import (
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-# 上传文件大小上限：200MB（.log 真实数据集通常较大）
-MAX_UPLOAD_BYTES = 200 * 1024 * 1024
+# 上传文件大小上限：3GB（支持 HDFS Loghub 等大型数据集）
+MAX_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
 # 允许的文件后缀
 ALLOWED_EXTENSIONS = {".csv", ".log", ".txt"}
 
@@ -47,7 +47,7 @@ ALLOWED_EXTENSIONS = {".csv", ".log", ".txt"}
 
 class GenerateRequest(BaseModel):
     count: int = Field(default=10000, ge=1, le=100000, description="生成日志条数")
-    vectorize: bool = Field(default=True, description="入库后是否触发向量化")
+    vectorize: bool = Field(default=True, description="入库后向量化+重建BM25（强制开启，不可关闭）")
     rebuild_vector: bool = Field(default=False, description="是否重建向量索引（清空 Qdrant）")
 
 
@@ -139,11 +139,11 @@ async def generate_and_ingest(
         task_id=task_id,
     )
 
-    # 后台线程跑流水线
+    # 后台线程跑流水线（vectorize 强制 True：BM25 全量重建依赖向量化步骤）
     _start_background_task(
         task_id, "generate",
         run_generate_pipeline,
-        request.count, request.vectorize, request.rebuild_vector,
+        request.count, True, request.rebuild_vector,
     )
 
     return TaskAcceptedResponse(
@@ -165,7 +165,7 @@ async def generate_and_ingest(
 )
 async def upload_and_ingest(
     file: UploadFile = File(..., description="日志文件（.csv / .log / .txt）"),
-    vectorize: bool = Query(default=True, description="入库后是否向量化"),
+    vectorize: bool = Query(default=True, description="入库后向量化+重建BM25（强制开启）"),
     rebuild_vector: bool = Query(default=False, description="是否重建向量索引"),
     max_logs: int = Query(
         default=0, ge=0,
@@ -244,12 +244,12 @@ async def upload_and_ingest(
         task_id=task_id,
     )
 
-    # 5. 后台线程跑流水线
+    # 5. 后台线程跑流水线（vectorize 强制 True：BM25 全量重建依赖向量化步骤）
     max_for_convert = max_logs if max_logs > 0 else None
     _start_background_task(
         task_id, "upload",
         run_upload_pipeline,
-        saved_path, vectorize, rebuild_vector, max_for_convert,
+        saved_path, True, rebuild_vector, max_for_convert,
     )
 
     return TaskAcceptedResponse(
@@ -363,6 +363,23 @@ async def list_tasks(
     }
 
 
+@router.post(
+    "/tasks/{task_id}/cancel",
+    summary="取消正在运行的入库任务（仅 admin）",
+)
+async def cancel_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """协作式取消：标记取消请求，流水线在下一批次检测到后自行停止。"""
+    _require_admin(current_user)
+
+    ok = task_store.request_cancel(task_id)
+    if not ok:
+        return {"success": False, "detail": "任务不存在或已结束，无法取消"}
+    return {"success": True, "detail": "取消请求已发送，任务将在当前批次完成后停止"}
+
+
 # ============================================================
 # 端点 5：数据库 + 向量库统计
 # ============================================================
@@ -406,3 +423,255 @@ async def get_formats(
         "success": True,
         "data": list_supported_formats(),
     }
+
+
+# ============================================================
+# 端点 7：补建索引（向量索引和/或 BM25 索引）
+# ============================================================
+
+class RebuildRequest(BaseModel):
+    mode: str = Field(
+        default="both",
+        description="重建模式：vector=只补建向量索引，bm25=只重建 BM25，both=两者都做",
+    )
+    rebuild_vector: bool = Field(
+        default=False,
+        description="是否清空 Qdrant Collection 全量重建（慎用，默认 False=增量续传）",
+    )
+
+
+def _validate_rebuild_mode(mode: str) -> bool:
+    return mode in ("vector", "bm25", "both")
+
+
+def _run_rebuild_pipeline(task_id: str, mode: str, rebuild_vector: bool):
+    """
+    重建索引后台任务：
+        - mode=vector : 增量补建 Qdrant 向量索引（从 last_log_id 检查点续传）
+        - mode=bm25   : 从 DB 全量重建 BM25 索引
+        - mode=both   : 先补建向量索引，再重建 BM25
+
+    复用 task_store 的 vectorize 步骤上报进度：
+        - sub_step=vector 时显示向量化进度
+        - sub_step=bm25 时显示 BM25 重建进度
+    """
+    from services.batch_vectorize import batch_vectorize
+
+    if not task_store.try_start(task_id):
+        task_store.finish(task_id, success=False, error="已有任务在运行")
+        return
+
+    try:
+        # rebuild 任务不涉及解析/清洗/入库，标记为 skipped
+        for step in ["convert", "parse", "clean", "import"]:
+            task_store.update_step(task_id, step, status="skipped")
+
+        # ---- Step 1: 向量索引补建 ----
+        if mode in ("vector", "both"):
+            task_store.update_step(
+                task_id, "vectorize", status="running",
+                detail={"sub_step": "vector", "processed": 0, "total": 0},
+            )
+
+            def _on_progress(processed, total):
+                task_store.update_step(
+                    task_id, "vectorize",
+                    detail={"sub_step": "vector", "processed": processed, "total": total},
+                )
+
+            def _cancel_check():
+                return task_store.is_cancel_requested(task_id)
+
+            try:
+                batch_vectorize(
+                    batch_size=1024,
+                    vector_batch_size=512,
+                    resume=not rebuild_vector,
+                    rebuild=rebuild_vector,
+                    progress_callback=_on_progress,
+                    cancel_callback=_cancel_check,
+                )
+            except InterruptedError as e:
+                task_store.clear_cancel(task_id)
+                task_store.update_step(
+                    task_id, "vectorize", status="failed",
+                    detail={"reason": str(e)},
+                )
+                task_store.finish(task_id, success=False, error=str(e))
+                return
+
+            if mode == "both":
+                task_store.update_step(task_id, "vectorize", status="done")
+
+        # ---- Step 2: BM25 重建 ----
+        if mode in ("bm25", "both"):
+            # 如果只跑 BM25，vectorize 之前是 pending，标记为 running 以显示 BM25 进度
+            # 如果 both，vectorize 已经 done，这里改回 running 显示 BM25 子步骤
+            task_store.update_step(
+                task_id, "vectorize", status="running",
+                detail={"sub_step": "bm25", "phase": "loading"},
+            )
+
+            # BM25 重建前检测取消
+            if task_store.is_cancel_requested(task_id):
+                task_store.clear_cancel(task_id)
+                task_store.finish(task_id, success=False, error="用户在 BM25 重建前取消了任务")
+                return
+
+            _rebuild_bm25_index(task_id)
+
+        task_store.update_step(task_id, "vectorize", status="done")
+        task_store.finish(task_id, success=True)
+
+    except Exception as e:
+        logger.error(f"重建任务失败: {task_id}", exc_info=True)
+        task_store.update_step(task_id, "vectorize", status="failed")
+        task_store.finish(task_id, success=False, error=str(e))
+
+
+def _rebuild_bm25_index(task_id: str):
+    """
+    从 DB 全量重建 BM25 索引（流式加载，避免一次性加载千万级 ORM 对象）。
+
+    进度通过 task_store 上报到 vectorize 步骤的 detail.sub_step=bm25。
+    """
+    import time
+    from sqlalchemy import text
+    from core.database import engine
+    import services.bm25_retriever as bm25_module
+    from services.bm25_retriever import get_bm25_retriever
+
+    t0 = time.time()
+
+    # 清除全局单例，强制从最新 DB 数据重建
+    bm25_module._bm25_retriever = None
+
+    # 统计总数
+    with engine.connect() as conn:
+        total = conn.execute(text("SELECT COUNT(*) FROM logs")).scalar()
+    logger.info(f"[{task_id}] BM25 重建：待索引日志数 {total}")
+
+    # 流式加载
+    corpus = []
+    processed = 0
+    batch_size = 50000
+    with engine.connect() as conn:
+        result = conn.execution_options(stream_results=True).execute(
+            text("SELECT id, level, service, timestamp, message FROM logs ORDER BY id")
+        )
+        while True:
+            # 检测取消
+            if task_store.is_cancel_requested(task_id):
+                task_store.clear_cancel(task_id)
+                raise InterruptedError("用户在 BM25 加载阶段取消了任务")
+
+            rows = result.fetchmany(batch_size)
+            if not rows:
+                break
+            for row in rows:
+                corpus.append({
+                    "log_id": row[0],
+                    "level": row[1],
+                    "service": row[2],
+                    "timestamp": str(row[3]),
+                    "message": row[4],
+                    "chunk_text": row[4],
+                    "source": row[2],
+                })
+            processed += len(rows)
+            elapsed = time.time() - t0
+            speed = processed / elapsed if elapsed > 0 else 0
+            task_store.update_step(
+                task_id, "vectorize",
+                detail={
+                    "sub_step": "bm25",
+                    "phase": "loading",
+                    "processed": processed,
+                    "total": total,
+                    "speed": round(speed, 0),
+                },
+            )
+            logger.info(
+                f"[{task_id}] BM25 加载: {processed}/{total} "
+                f"({processed/total*100:.1f}%) | {speed:.0f} rows/s"
+            )
+
+    # 构建 BM25 索引
+    task_store.update_step(
+        task_id, "vectorize",
+        detail={"sub_step": "bm25", "phase": "building", "total": len(corpus)},
+    )
+    logger.info(f"[{task_id}] BM25 构建：{len(corpus)} 条文档")
+    get_bm25_retriever(corpus=corpus, cache_path="./bm25_index.pkl")
+
+    elapsed = time.time() - t0
+    logger.info(f"[{task_id}] BM25 重建完成：{len(corpus)} 条，耗时 {elapsed:.1f}s")
+
+
+@router.post(
+    "/rebuild",
+    response_model=TaskAcceptedResponse,
+    summary="补建索引（仅 admin）",
+)
+async def rebuild_indexes(
+    request: RebuildRequest,
+    current_user: User = Depends(get_current_user),
+    db = Depends(get_db),
+):
+    """
+    补建向量索引和/或 BM25 索引。适用场景：
+        - 上传时未勾选「入库后向量化」，事后补建
+        - 向量化阶段失败，从检查点续传
+        - BM25 索引未构建或过时，全量重建
+
+    **mode 参数**：
+        - `vector` : 增量补建 Qdrant 向量索引（从 last_log_id 检查点续传）
+        - `bm25`   : 从 DB 全量重建 BM25 索引
+        - `both`   : 先补建向量索引，再重建 BM25（推荐）
+
+    **rebuild_vector**：True=清空 Qdrant 全量重做（慎用），False=增量续传（默认）
+
+    任务异步执行，立即返回 task_id，通过 `GET /api/ingest/tasks/{task_id}` 查询进度。
+    """
+    _require_admin(current_user)
+
+    if not _validate_rebuild_mode(request.mode):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"无效的 mode: {request.mode}，可选: vector / bm25 / both",
+        )
+
+    # 检查是否已有任务在跑
+    if task_store.is_busy():
+        running_id = task_store.running_task_id()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"已有入库任务在运行: {running_id}，请等待完成",
+        )
+
+    task_id = generate_task_id("rebuild")
+    task_store.create(task_id, task_type="rebuild")
+    _audit_ingest(db, current_user, "ingest.rebuild.start", task_id, {
+        "mode": request.mode,
+        "rebuild_vector": request.rebuild_vector,
+    })
+
+    # 签发任务专用长期 token
+    task_token = create_task_token(
+        user_id=current_user.id,
+        username=current_user.username,
+        task_id=task_id,
+    )
+
+    # 后台线程跑重建流水线
+    _start_background_task(
+        task_id, "rebuild",
+        _run_rebuild_pipeline, task_id, request.mode, request.rebuild_vector,
+    )
+
+    return TaskAcceptedResponse(
+        task_id=task_id,
+        message=f"索引重建任务已启动（mode={request.mode}）",
+        task_type="rebuild",
+        task_token=task_token,
+    )

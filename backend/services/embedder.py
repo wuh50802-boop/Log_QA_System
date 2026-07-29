@@ -27,8 +27,10 @@ class BGEEmbedder:
     # 向量维度
     VECTOR_SIZE = 768
     
-    # 最大批次大小（避免内存溢出）
-    MAX_BATCH_SIZE = 32
+    # 编码器单次 forward pass 的最大文本数。
+    # RTX 4060 8GB 实测：batch=128 占用 ~2.6GB，batch=256 占用 ~3.5GB，batch=512 占用 ~5.5GB。
+    # 默认 256 在吞吐和显存之间取平衡；显存充裕可调到 512。
+    MAX_BATCH_SIZE = 256
     
     def __init__(self, model_name: Optional[str] = None, device: Optional[str] = None):
         self.model_name = model_name or self.MODEL_NAME

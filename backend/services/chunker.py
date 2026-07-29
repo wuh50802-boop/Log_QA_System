@@ -50,8 +50,8 @@ class LogChunker:
     内置保护规则：不拆分数字+单位组合、保留原文字符偏移、块重叠防语义断裂
     """
     # 默认配置常量
-    DEFAULT_CHUNK_SIZE = 256    # 单块最大字符，适配BGE 512token窗口
-    DEFAULT_OVERLAP = 50        # 块重叠长度，建议 chunk_size * 0.1 ~ 0.2
+    DEFAULT_CHUNK_SIZE = 200    # 单块最大字符，适配BGE 512token窗口
+    DEFAULT_OVERLAP = 20        # 块重叠长度，建议 chunk_size * 0.1 ~ 0.2
     DEFAULT_MIN_CHUNK_SIZE = 20 # 最小有效块长度，过短碎片自动合并
     MAX_TOKEN_RATIO = 2.2       # 中文粗略字符转token系数：1token≈2.2中文字符
 

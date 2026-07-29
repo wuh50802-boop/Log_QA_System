@@ -6,6 +6,7 @@ import AdminRoute from './components/AdminRoute';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
+import FeedbackStats from './pages/FeedbackStats';
 import UserManagement from './pages/UserManagement';
 import AdminLogs from './pages/AdminLogs';
 import './App.css';
@@ -22,6 +23,15 @@ function App() {
             element={
               <ProtectedRoute>
                 <Dashboard />
+              </ProtectedRoute>
+            }
+          />
+          {/* 反馈统计（所有登录用户可访问） */}
+          <Route
+            path="/feedback"
+            element={
+              <ProtectedRoute>
+                <FeedbackStats />
               </ProtectedRoute>
             }
           />

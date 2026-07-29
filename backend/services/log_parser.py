@@ -125,7 +125,60 @@ class LogParser:
             return [], []
         
         return valid_logs, failed_logs
-    
+
+    @classmethod
+    def parse_csv_chunked(cls, filepath: str, encoding: str = "utf-8",
+                          chunk_size: int = 50000):
+        """
+        分块解析 CSV 日志文件（生成器），避免一次性加载全部数据到内存。
+
+        Yields:
+            (chunk: List[Dict], failed_in_chunk: int)
+            每积累 chunk_size 条有效日志就 yield 一次。
+            最后一次 yield 为剩余不足 chunk_size 的尾部数据。
+        """
+        valid_chunk: List[Dict] = []
+        failed_count = 0
+
+        try:
+            with open(filepath, 'r', encoding=encoding) as f:
+                sample = f.readline()
+                f.seek(0)
+                has_header = ',' in sample and not sample[0].isdigit()
+                reader = csv.DictReader(f) if has_header else csv.reader(f)
+
+                for row_num, row in enumerate(reader, start=1 if has_header else 0):
+                    if not has_header:
+                        if len(row) < len(cls.REQUIRED_FIELDS):
+                            failed_count += 1
+                            continue
+                        log_dict = dict(zip(cls.REQUIRED_FIELDS, row))
+                    else:
+                        log_dict = dict(row)
+
+                    log_dict = {k: str(v).strip() for k, v in log_dict.items()}
+                    is_valid, _ = cls.parse_line(log_dict)
+
+                    if is_valid:
+                        log_dict["level"] = log_dict["level"].upper()
+                        valid_chunk.append(log_dict)
+                        if len(valid_chunk) >= chunk_size:
+                            yield valid_chunk, failed_count
+                            valid_chunk = []
+                            failed_count = 0
+                    else:
+                        failed_count += 1
+
+            # 尾部剩余
+            if valid_chunk or failed_count:
+                yield valid_chunk, failed_count
+
+        except FileNotFoundError:
+            return
+        except Exception:
+            if valid_chunk:
+                yield valid_chunk, failed_count
+
     @classmethod
     def get_statistics(cls, valid_logs: List[Dict], failed_logs: List[Dict]) -> Dict:
         """

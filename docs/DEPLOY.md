@@ -103,14 +103,15 @@ python scripts/generate_logs.py
 python scripts/import_logs.py
 
 # 3. 向量化并写入 Qdrant（--rebuild 会重建 collection）
-python scripts/batch_vectorize.py --rebuild
+python services/batch_vectorize.py --rebuild
+# 注：python scripts/batch_vectorize.py ... 仍可用（兼容入口）
 ```
 
 首次运行注意事项：
 - `jieba` 首次调用会自动加载词典，耗时约 1-2 秒。
 - `NLTK` 首次调用会自动下载 `punkt` 和 `stopwords` 数据集到 `~/nltk_data/`。
 - BGE 模型首次会从 ModelScope 下载（约 200MB），缓存到 `backend/models_cache/`。
-- `batch_vectorize.py` 支持断点续传，进度记录在 `backend/vectorize_checkpoint.json`。
+- `services/batch_vectorize.py` 支持断点续传，进度记录在 `backend/vectorize_checkpoint.json`。
 
 ### 2.4 启动后端
 
@@ -233,7 +234,7 @@ QDRANT_API_KEY=
 
 Payload 字段（建议建索引）：`log_id`、`level`、`service`、`timestamp`、`chunk_text`、`source`。
 
-首次运行 `python scripts/batch_vectorize.py --rebuild` 会自动创建 collection 并写入向量，无需手动建表。
+首次运行 `python services/batch_vectorize.py --rebuild` 会自动创建 collection 并写入向量，无需手动建表。
 
 ---
 
@@ -388,7 +389,7 @@ location /api/ {
 | `backend/app.db` | SQLite 数据库 | 首次启动后端时生成 |
 | `backend/models_cache/` | BGE 模型缓存 | 首次加载 BGE 时生成（约 200MB） |
 | `backend/bm25_index.pkl` | BM25 索引缓存 | 首次构建 BM25 索引时生成 |
-| `backend/vectorize_checkpoint.json` | 向量化断点续传记录 | 运行 `batch_vectorize.py` 时生成 |
+| `backend/vectorize_checkpoint.json` | 向量化断点续传记录 | 运行 `services/batch_vectorize.py` 时生成 |
 | `frontend/dist/` | 前端构建产物 | 执行 `npm run build` 后生成 |
 | `backend/.env` | 后端环境变量 | 手动创建 |
 | `frontend/.env` | 前端环境变量 | 手动创建 |
@@ -404,7 +405,7 @@ location /api/ {
 - [ ] Qdrant 实例可访问（本地或云端）
 - [ ] `python scripts/generate_logs.py` 已执行
 - [ ] `python scripts/import_logs.py` 已执行
-- [ ] `python scripts/batch_vectorize.py --rebuild` 已执行
+- [ ] `python services/batch_vectorize.py --rebuild` 已执行
 - [ ] `frontend/.env` 已配置 `VITE_API_BASE_URL`
 - [ ] 后端 `uvicorn main:app` 启动后 `/health` 返回 healthy
 - [ ] 前端 `npm run dev` 启动后可访问 http://localhost:5173

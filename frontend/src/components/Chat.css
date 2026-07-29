@@ -650,6 +650,28 @@
   text-align: center;
   font-weight: 500;
   border-bottom: 1px solid var(--border-default);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.chat-viewing-back-btn {
+  padding: 3px 10px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.chat-viewing-back-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+  background: var(--bg-muted);
 }
 
 .chat-viewing-banner strong {

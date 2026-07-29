@@ -48,6 +48,28 @@ export async function getTaskStatus(taskId, taskToken) {
   return res.data;
 }
 
+// 取消正在运行的任务
+export async function cancelTask(taskId) {
+  const res = await apiClient.post(`/api/ingest/tasks/${taskId}/cancel`);
+  return res.data;
+}
+
+/**
+ * 补建索引（向量索引和/或 BM25 索引）
+ *
+ * @param {object} opts
+ * @param {string} [opts.mode='both'] - 重建模式：vector | bm25 | both
+ * @param {boolean} [opts.rebuildVector=false] - 是否清空 Qdrant 全量重建（慎用）
+ * @returns {Promise<{success, task_id, task_token, message}>}
+ */
+export async function rebuildIndexes({ mode = 'both', rebuildVector = false } = {}) {
+  const res = await apiClient.post('/api/ingest/rebuild', {
+    mode,
+    rebuild_vector: rebuildVector,
+  });
+  return res.data;
+}
+
 // 列出最近任务
 export async function listTasks(limit = 20) {
   const res = await apiClient.get('/api/ingest/tasks', { params: { limit } });

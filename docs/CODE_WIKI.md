@@ -195,11 +195,13 @@ log-qa-system/
 │   ├── api/                         # API 路由层
 │   │   ├── __init__.py
 │   │   ├── auth.py                  # 认证 + 用户管理 + 改密路由
+│   │   ├── ingest.py                # ★ 日志摄入路由（上传/生成/任务状态/统计，仅 admin）
 │   │   └── qa.py                    # ★ 问答路由（同步/SSE/历史/会话/反馈/统计 + NL2SQL 路由）
 │   ├── core/                        # 核心配置层
 │   │   ├── __init__.py
 │   │   ├── config.py                # 应用配置类 Settings
 │   │   ├── database.py              # SQLAlchemy 引擎与会话
+│   │   ├── tasks.py                 # ★ 后台任务状态管理（摄入任务进度/步骤/恢复）
 │   │   └── security.py              # JWT + bcrypt 密码工具
 │   ├── data/                        # 日志数据 CSV
 │   │   ├── logs.csv
@@ -225,8 +227,11 @@ log-qa-system/
 │   │   └── qa.py                    # ★ QA 请求/响应 + 历史 + 会话 + 反馈 + 质量检查 Schema
 │   ├── scripts/                     # 运维/数据脚本 + 功能测试脚本
 │   │   ├── import_logs.py           # 日志批量入库
-│   │   ├── batch_vectorize.py       # 批量向量化入库 Qdrant
+│   │   ├── batch_vectorize.py       # 兼容入口（转发到 services/batch_vectorize.py）
 │   │   ├── generate_logs.py         # 生成测试日志
+│   │   ├── rebuild_indexes.py       # 重建 BM25 / 向量索引
+│   │   ├── clear_all_data.py        # 清空所有数据（SQLite + Qdrant）
+│   │   ├── watch_index.py           # 实时监控 Qdrant 索引状态
 │   │   ├── check_db.py              # 检查数据库表
 │   │   ├── debug_bm25.py            # BM25 分词调试
 │   │   ├── visualize_retrieval.py   # 检索结果可视化对比
@@ -242,9 +247,11 @@ log-qa-system/
 │   ├── services/                    # 核心业务服务层（RAG 核心）
 │   │   ├── __init__.py
 │   │   ├── qa_pipeline.py            # ★ 问答流水线编排（内置来源提取）
+│   │   ├── ingest_service.py         # ★ 摄入流水线（解析→清洗→分块→向量化→BM25重建）
 │   │   ├── hybrid_retriever.py       # ★ 混合检索器（RRF 融合）
 │   │   ├── retriever.py              # 向量检索器
 │   │   ├── bm25_retriever.py         # BM25 关键词检索器
+│   │   ├── sqlite_retriever.py       # SQLite LIKE 检索器（第三路召回）
 │   │   ├── qdrant_client.py          # Qdrant 客户端封装
 │   │   ├── embedder.py               # BGE 嵌入模型封装
 │   │   ├── reranker.py               # ★ Cross-Encoder 重排序（bge-reranker-base，可选）
@@ -255,6 +262,7 @@ log-qa-system/
 │   │   ├── formatter.py              # 检索结果格式化
 │   │   ├── log_parser.py             # 日志解析器
 │   │   ├── log_cleaner.py            # 日志清洗器
+│   │   ├── batch_vectorize.py        # ★ 批量向量化入库 Qdrant（断点续传+增量+模板去重）
 │   │   ├── quality_checker.py        # 回答质量自检
 │   │   ├── error_handler.py          # 统一异常处理（RobustQAPipeline）
 │   │   └── exceptions.py             # 自定义异常类
@@ -280,6 +288,7 @@ log-qa-system/
 │   │   ├── api/
 │   │   │   ├── client.js            # axios 实例 + 拦截器
 │   │   │   ├── auth.js              # 认证 + 用户管理 + 改密 API 封装
+│   │   │   ├── ingest.js            # ★ 摄入 API 封装（上传/生成/任务轮询/统计）
 │   │   │   └── qa.js                # ★ 问答 API 封装（同步/SSE/历史/会话/反馈/统计）
 │   │   ├── assets/
 │   │   ├── components/
@@ -292,10 +301,12 @@ log-qa-system/
 │   │   │   └── AuthContext.jsx      # 全局认证 Context
 │   │   ├── pages/
 │   │   │   ├── Dashboard.jsx / .css # 主问答界面（含 Chat + ConversationSidebar）
+│   │   │   ├── AdminLogs.jsx / .css # ★ 管理员日志摄入界面（上传/生成/任务监控）
+│   │   │   ├── FeedbackStats.jsx / .css # ★ 反馈统计面板（点赞率/踩排行）
 │   │   │   ├── Login.jsx / .css     # 登录页
 │   │   │   ├── Register.jsx         # 注册页
 │   │   │   └── UserManagement.jsx   # ★ 管理员用户管理界面（admin 专属）
-│   │   ├── App.jsx                  # 根组件 + 路由（含 /admin/users）
+│   │   ├── App.jsx                  # 根组件 + 路由（含 /admin/users、/admin/logs、/admin/feedback）
 │   │   ├── App.css
 │   │   ├── index.css
 │   │   └── main.jsx                 # 入口
@@ -1002,7 +1013,7 @@ QASystemError(Exception)                      # 基础异常，error_code="QA_ER
 | 脚本 | 用途 | 运行方式 |
 |------|------|----------|
 | `import_logs.py` | 将 `logs_cleaned.csv` 批量导入 SQLite，按 (message, service) 去重，支持 `--csv/--batch-size/--stats/--clear` | `python scripts/import_logs.py` |
-| `batch_vectorize.py` | 从 DB 读取日志→分块→向量化→写入 Qdrant，支持断点续传（`vectorize_checkpoint.json`，每 30s 存档）、重建、干跑 | `python scripts/batch_vectorize.py --rebuild` |
+| `batch_vectorize.py` | 从 DB 读取日志→分块→向量化→写入 Qdrant，支持断点续传（`vectorize_checkpoint.json`，每批存档）、增量、重建、干跑。位于 `services/`，`scripts/batch_vectorize.py` 为兼容入口 | `python services/batch_vectorize.py --rebuild` |
 | `generate_logs.py` | 生成 10000 条模拟日志到 `logs.csv`（5 个服务、4 个级别） | `python scripts/generate_logs.py` |
 | `check_db.py` | 列出 SQLite 表名（注意：写死 `logs.db`，与默认 `app.db` 不同，详见第 12 章） | `python scripts/check_db.py` |
 | `debug_bm25.py` | 调试 BM25 分词与匹配效果 | `python scripts/debug_bm25.py` |
@@ -1220,13 +1231,13 @@ BrowserRouter
 1. generate_logs.py        → 生成 logs.csv（10000 条模拟日志）
 2. (手动清洗)              → logs_cleaned.csv
 3. import_logs.py          → 去重导入 SQLite app.db 的 logs 表
-4. batch_vectorize.py      →
-     ├─ fetch_logs_from_db（分页读取 + 修复 source 字段）
+4. services/batch_vectorize.py →
+     ├─ fetch_logs_from_db（基于 last_log_id 游标分页 + 修复 source 字段）
      ├─ LogChunker.chunk_logs（hybrid 策略，chunk_size=256, overlap=50）
-     ├─ BGEEmbedder.encode_batch（向量化，768 维）
+     ├─ BGEEmbedder.encode_batch（向量化，768 维）+ TemplateVectorCache 模板去重
      └─ QdrantClientWrapper.upsert_vectors（写入 Qdrant，含 payload）
-        ├─ 每 30s 保存 vectorize_checkpoint.json
-        └─ 支持 --resume 断点续传 / --rebuild 重建
+        ├─ 每批保存 vectorize_checkpoint.json
+        └─ 支持 --resume 断点续传 / --rebuild 重建 / 增量向量化
 ```
 
 ### 7.2 问答流程（在线）
@@ -1561,8 +1572,9 @@ python scripts/import_logs.py                     # 默认导入 data/logs_clean
 python scripts/import_logs.py --stats             # 查看统计
 
 # 4. 向量化并写入 Qdrant
-python scripts/batch_vectorize.py --rebuild       # 首次需重建 Collection
-python scripts/batch_vectorize.py --resume        # 断点续传（默认）
+python services/batch_vectorize.py --rebuild       # 首次需重建 Collection
+python services/batch_vectorize.py --resume        # 断点续传（默认）
+# 注：python scripts/batch_vectorize.py ... 仍可用（兼容入口）
 ```
 
 ### 10.4 启动服务
@@ -1598,7 +1610,7 @@ pytest tests/ -m "not integration"                # 跳过集成测试
 INTEGRATION_TEST=true pytest tests/ -m integration # 启用集成测试（需 Qdrant 数据）
 ```
 
-> 注：检索相关测试在 Qdrant 无数据时会 `pytest.skip`，需先运行 `batch_vectorize.py` 入库。
+> 注：检索相关测试在 Qdrant 无数据时会 `pytest.skip`，需先运行 `services/batch_vectorize.py` 入库。
 
 ### 10.7 调试与可视化工具
 

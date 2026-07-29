@@ -290,6 +290,13 @@ const Chat = ({ conversationId, onConversationChanged, onSidebarToggle }) => {
       {/* admin 查看他人会话时的提示横幅 */}
       {viewingOwner && viewingOwner !== user?.username && (
         <div className="chat-viewing-banner" title="管理员查看模式">
+          <button
+            className="chat-viewing-back-btn"
+            onClick={() => window.history.back()}
+            title="返回上一页"
+          >
+            ← 返回
+          </button>
           管理员查看模式 · 正在查看用户 <strong>{viewingOwner}</strong> 的会话
           <span className="chat-viewing-sub">（仅查看，不能在此发送新消息）</span>
         </div>

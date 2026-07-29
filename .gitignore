@@ -30,6 +30,8 @@ models_cache/
 # Runtime outputs
 performance_results.json
 *.log
+backend/tasks_history.json
+backend/vectorize_checkpoint.json
 
 # 入库运行时生成的中间文件（CSV/转换产物/失败日志）
 backend/data/

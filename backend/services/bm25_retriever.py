@@ -6,6 +6,7 @@ import logging
 import pickle
 import os
 import re
+import time
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
@@ -78,34 +79,37 @@ class BM25Retriever:
     
     def _tokenize(self, text: str) -> List[str]:
         """
-        中英文混合分词 + 词干提取 + 中英文映射（高效版）
-        
+        中英文混合分词 + 词干提取 + 中英文映射 + 技术标识符提取
+
         策略：
         1. 快速检测文本语言类型
         2. 根据语言类型选择处理策略
         3. 中英文查询都能匹配英文日志
+        4. 额外提取技术标识符（blk_123、0xff00、192.168.1.1、E1234 等）
+           这类标识符含字母+数字+分隔符，传统 [a-z]+ 分词会丢失数字部分，
+           导致搜 blk_123456 只能匹配 blk。标识符不做词干提取（是专有名词）。
         """
         if not text or not text.strip():
             return []
-        
+
         text_lower = text.lower()
         all_tokens = []
-        
+
         # 快速检测语言类型
         has_chinese = bool(re.search(r'[\u4e00-\u9fff]', text))
         has_english = bool(re.search(r'[a-z]', text_lower))
-        
+
         # === 情况1：纯中文查询 ===
         if has_chinese and not has_english:
             # 中文分词
             chinese_tokens = jieba.lcut(text)
             chinese_tokens = [t for t in chinese_tokens if re.search(r'[\u4e00-\u9fff]', t) and len(t) >= 1]
             all_tokens.extend(chinese_tokens)
-            
+
             # 中英文映射（为每个中文词添加英文同义词）
             for cn_token in chinese_tokens:
                 all_tokens.extend(self._map_chinese_to_english(cn_token))
-        
+
         # === 情况2：纯英文查询 ===
         elif has_english and not has_chinese:
             # 提取英文单词
@@ -113,7 +117,7 @@ class BM25Retriever:
             # 词干提取
             english_tokens = [self.stemmer.stem(t) for t in english_tokens if len(t) >= 2]
             all_tokens.extend(english_tokens)
-        
+
         # === 情况3：中英文混合查询 ===
         else:
             # 处理英文部分
@@ -121,21 +125,26 @@ class BM25Retriever:
                 english_tokens = re.findall(r'[a-z]{2,}', text_lower)
                 english_tokens = [self.stemmer.stem(t) for t in english_tokens if len(t) >= 2]
                 all_tokens.extend(english_tokens)
-            
+
             # 处理中文部分
             if has_chinese:
                 chinese_tokens = jieba.lcut(text)
                 chinese_tokens = [t for t in chinese_tokens if re.search(r'[\u4e00-\u9fff]', t) and len(t) >= 1]
                 all_tokens.extend(chinese_tokens)
-                
+
                 # 中英文映射
                 for cn_token in chinese_tokens:
                     all_tokens.extend(self._map_chinese_to_english(cn_token))
-        
+
+        # === 提取技术标识符（所有情况都执行） ===
+        # 匹配含字母+数字的标识符（如 blk_123456、0xff00ab、192.168.1.1、E1234、blk_-1234567）
+        # 不做词干提取：标识符是专有名词，stem 会破坏其精确匹配语义
+        all_tokens.extend(self._extract_identifiers(text_lower))
+
         # 过滤停用词
         stopwords = self._get_stopwords()
         all_tokens = [t for t in all_tokens if t not in stopwords and len(t) >= 2]
-        
+
         # 去重（保持顺序）
         seen = set()
         unique_tokens = []
@@ -143,8 +152,35 @@ class BM25Retriever:
             if token not in seen:
                 seen.add(token)
                 unique_tokens.append(token)
-        
+
         return unique_tokens
+
+    # 技术标识符正则：字母开头，后跟字母/数字/下划线/连字符/点，且至少包含一个数字
+    # 例：blk_123456、0xff00ab、192.168.1.1、E1234、blk_-1234567、fs namesystem
+    _IDENTIFIER_PATTERN = re.compile(
+        r'[a-z0-9][a-z0-9_.-]*\d[a-z0-9_.-]*',
+        re.IGNORECASE
+    )
+
+    def _extract_identifiers(self, text_lower: str) -> List[str]:
+        """
+        提取技术标识符：含字母+数字+分隔符的连续串。
+
+        与纯字母单词提取互补：
+        - [a-z]{2,}  → 'blk_123456' 得到 'blk'（数字丢失）
+        - 本方法     → 'blk_123456' 得到 'blk_123456'（完整保留）
+
+        不做词干提取，因为 blk_123 和 blk_456 是不同的 block ID。
+        """
+        raw_matches = self._IDENTIFIER_PATTERN.findall(text_lower)
+        identifiers = []
+        for match in raw_matches:
+            # 去掉首尾的分隔符（_.-）避免 token 边界不一致
+            cleaned = match.strip('._-')
+            # 至少 3 字符且包含数字（过滤掉纯字母单词，那些已由 [a-z]+ 处理）
+            if len(cleaned) >= 3 and any(c.isdigit() for c in cleaned):
+                identifiers.append(cleaned)
+        return identifiers
 
     def _map_chinese_to_english(self, chinese_word: str) -> List[str]:
         """
@@ -337,18 +373,21 @@ class BM25Retriever:
         if not corpus:
             logger.warning("语料库为空")
             return
-        
-        logger.info(f"开始构建 BM25 索引，文档数: {len(corpus)}")
-        
+
+        total = len(corpus)
+        logger.info(f"开始构建 BM25 索引，文档数: {total}")
+
+        # ---- 阶段 1: 文档预处理（拼接文本） ----
+        t0 = time.time()
         self.documents = []
         texts = []
-        
+
         for doc in corpus:
             # 获取文本内容
             text = doc.get('chunk_text', '') or doc.get('message', '')
             if not text:
                 continue
-            
+
             # 添加服务名和级别增强匹配
             text_parts = [text]
             if doc.get('service'):
@@ -357,41 +396,62 @@ class BM25Retriever:
                 text_parts.append(doc['level'])
             if doc.get('source'):
                 text_parts.append(doc['source'])
-            
+
             full_text = ' '.join(text_parts)
-            
+
             self.documents.append({
                 'log_id': doc.get('log_id'),
                 'payload': doc,
                 'text': full_text,
             })
             texts.append(full_text)
-        
+
         if not texts:
             logger.warning("没有有效的文本内容")
             return
-        
-        # 分词
-        logger.info(f"正在分词，共 {len(texts)} 条文本...")
-        self.tokenized_corpus = [self._tokenize(text) for text in texts]
-        
+
+        logger.info(f"✅ 阶段 1/3 文档预处理完成: {len(texts)} 条，耗时 {time.time() - t0:.1f}s")
+
+        # ---- 阶段 2: 分词（最耗时，带进度） ----
+        logger.info(f"⏳ 阶段 2/3 正在分词，共 {len(texts)} 条文本...")
+        t1 = time.time()
+        self.tokenized_corpus = []
+        progress_interval = max(100000, len(texts) // 20)  # 至少 10 万条打一次，最多 20 次
+        for i, text in enumerate(texts):
+            self.tokenized_corpus.append(self._tokenize(text))
+            if (i + 1) % progress_interval == 0 or (i + 1) == len(texts):
+                elapsed = time.time() - t1
+                speed = (i + 1) / elapsed if elapsed > 0 else 0
+                pct = (i + 1) / len(texts) * 100
+                # 估算剩余时间
+                eta = (len(texts) - i - 1) / speed if speed > 0 else 0
+                eta_str = f"{eta:.0f}s" if eta < 60 else f"{eta/60:.1f}m"
+                logger.info(
+                    f"   分词进度: {i+1}/{len(texts)} ({pct:.1f}%) | "
+                    f"速度: {speed:.0f} docs/s | 剩余: {eta_str}"
+                )
+
+        logger.info(f"✅ 阶段 2/3 分词完成，耗时 {time.time() - t1:.1f}s")
+
         # 统计
         all_words = set()
         for tokens in self.tokenized_corpus:
             all_words.update(tokens)
         logger.info(f"   - 总词汇数: {len(all_words)}")
         logger.info(f"   - 平均文档词数: {sum(len(t) for t in self.tokenized_corpus) / len(self.tokenized_corpus):.1f}")
-        
+
         # 显示样本分词结果（调试）
         if self.tokenized_corpus:
             sample_tokens = self.tokenized_corpus[0][:10]
             logger.info(f"   - 样本分词: {sample_tokens}")
-        
-        # 构建 BM25 索引
-        logger.info("构建 BM25 索引...")
+
+        # ---- 阶段 3: 构建 BM25Okapi 索引 ----
+        logger.info("⏳ 阶段 3/3 构建 BM25Okapi 索引...")
+        t2 = time.time()
         self.bm25 = BM25Okapi(self.tokenized_corpus)
-        
-        logger.info(f"✅ BM25 索引构建完成，文档数: {len(self.documents)}")
+        logger.info(f"✅ 阶段 3/3 BM25Okapi 构建完成，耗时 {time.time() - t2:.1f}s")
+
+        logger.info(f"🎉 BM25 索引构建完成，文档数: {len(self.documents)}，总耗时 {time.time() - t0:.1f}s")
         
         if self.use_cache and self.cache_path:
             self.save_index(self.cache_path)

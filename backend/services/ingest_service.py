@@ -12,6 +12,8 @@ CSV 文件会跳过"格式转换"步骤，直接进入解析。
 
 任务状态通过 core.tasks.task_store 跟踪，前后端通过 task_id 查询进度。
 """
+import gc
+import json
 import logging
 import time
 import uuid
@@ -197,6 +199,48 @@ def save_upload_file(file_bytes: bytes, original_name: str) -> Path:
     return target
 
 
+def _cleanup_intermediate_files(csv_path: Path, owns_csv: bool) -> dict:
+    """
+    入库成功后清理中间产物：断点续传检查点 + （可选）中间 CSV。
+
+    仅在流水线成功跑完后调用。失败时必须保留这两类文件以便重试：
+        - 检查点记录了已完成的批次，重试时跳过；
+        - 中间 CSV 是检查点里 csv_path 指向的文件，删除后检查点失效。
+
+    Args:
+        csv_path: 流水线使用的 CSV 路径
+        owns_csv: 是否由本流水线生成（generate/convert=True，用户上传 CSV=False）
+
+    Returns:
+        清理结果 dict（用于记入 artifacts）
+    """
+    result = {"checkpoint_removed": False, "csv_removed": False,
+              "csv_path": str(csv_path), "owns_csv": owns_csv}
+
+    # 1. 删除断点续传检查点文件（无论 owns_csv 与否都应清理）
+    checkpoint_file = DATA_DIR / f"checkpoint_{csv_path.name}.json"
+    try:
+        if checkpoint_file.exists():
+            checkpoint_file.unlink()
+            logger.info(f"🧹 已删除检查点文件: {checkpoint_file.name}")
+            result["checkpoint_removed"] = True
+    except Exception as e:
+        logger.warning(f"⚠️ 删除检查点文件失败（不影响入库结果）: {e}")
+
+    # 2. 删除中间 CSV（仅限流水线自己生成的文件）
+    #    用户直接上传的 .csv 绝不删除。
+    if owns_csv:
+        try:
+            if csv_path.exists():
+                csv_path.unlink()
+                logger.info(f"🧹 已删除中间 CSV: {csv_path.name}")
+                result["csv_removed"] = True
+        except Exception as e:
+            logger.warning(f"⚠️ 删除中间 CSV 失败（不影响入库结果）: {e}")
+
+    return result
+
+
 # ============================================================
 # 流水线：上传模式（真实数据，支持 CSV 和 LOG）
 # ============================================================
@@ -261,6 +305,12 @@ def _run_pipeline(
     logger.info(f"入库任务开始: {task_id} (type={task_type})")
     start_total = time.time()
 
+    # 标记当前流水线是否"拥有" csv_path（即流水线自己生成的中间文件）。
+    # - generate 模式生成的 logs_{task_id}.csv     → 自己生成，成功后可清理
+    # - .log/.txt 转换得到的 converted_{task_id}.csv → 自己生成，成功后可清理
+    # - 用户直接上传的 .csv                         → 用户文件，绝不能删
+    owns_csv = False
+
     try:
         # ---------- Step 0: 准备输入文件 ----------
         # generate 模式下先生成 CSV
@@ -271,6 +321,7 @@ def _run_pipeline(
             logs = generate_logs(generate_count)
             csv_path = DATA_DIR / f"logs_{task_id}.csv"
             save_to_csv(logs, str(csv_path))
+            owns_csv = True  # 自己生成的中间 CSV
             task_store.update_step(task_id, "convert", status="done",
                                    detail={"generated": len(logs)},
                                    duration_sec=0)
@@ -284,6 +335,7 @@ def _run_pipeline(
             if suffix == ".csv":
                 # CSV 直接进入解析，convert 步骤标记为 skipped
                 csv_path = file_path
+                # 用户上传的 CSV：owns_csv 保持 False，禁止清理
                 task_store.update_step(task_id, "convert", status="skipped",
                                        detail={"reason": "CSV 文件无需转换"})
             else:
@@ -302,6 +354,7 @@ def _run_pipeline(
                                            detail={"error": str(e)})
                     raise
 
+                owns_csv = True  # 转换产生的中间 CSV
                 convert_duration = time.time() - t0
                 task_store.update_step(task_id, "convert", status="done",
                                        detail={
@@ -320,62 +373,146 @@ def _run_pipeline(
         else:
             raise ValueError("必须提供 file_path 或 generate_count 之一")
 
-        # ---------- Step 1: 解析 ----------
+        # ---------- Step 1-3: 分块 解析→清洗→入库（流式，内存友好） ----------
+        import hashlib as _hashlib
+        from scripts.import_logs import bulk_insert_logs
+
+        CHUNK_SIZE = 50000  # 每批处理 5 万条
+
+        # --- 断点续传：加载检查点 ---
+        checkpoint_file = DATA_DIR / f"checkpoint_{csv_path.name}.json"
+        resume_chunk = 0
+        if checkpoint_file.exists():
+            try:
+                with open(checkpoint_file, "r", encoding="utf-8") as f:
+                    ckpt = json.load(f)
+                if ckpt.get("csv_path") == str(csv_path):
+                    resume_chunk = ckpt.get("chunk_idx", 0)
+                    logger.info(f"📌 检测到断点: 跳过前 {resume_chunk} 批，从第 {resume_chunk + 1} 批继续")
+            except Exception:
+                resume_chunk = 0
+
         t0 = time.time()
         task_store.update_step(task_id, "parse", status="running",
-                               detail={"sub_step": "parsing"})
-        valid_logs, failed_logs = LogParser.parse_csv(str(csv_path))
+                               detail={"sub_step": "streaming"})
+        task_store.update_step(task_id, "clean", status="running")
+        task_store.update_step(task_id, "import", status="running")
 
-        # 失败日志落盘
-        failed_path = DATA_DIR / f"failed_{task_id}.log"
-        if failed_logs:
-            LogParser.save_failed_logs(failed_logs, str(failed_path))
+        # 全局去重集合（仅存 16 字节 MD5 摘要，1100 万条 ≈ 176 MB）
+        seen_hashes: set = set()
+        total_valid = 0
+        total_failed = 0
+        total_empty = 0
+        total_dup = 0
+        total_inserted = 0
+        total_skipped = 0
+        chunk_idx = 0
+
+        for chunk, failed_in_chunk in LogParser.parse_csv_chunked(
+                str(csv_path), chunk_size=CHUNK_SIZE):
+            chunk_idx += 1
+
+            # 断点续传：跳过已完成的批次
+            if chunk_idx <= resume_chunk:
+                total_valid += len(chunk)
+                total_failed += failed_in_chunk
+                del chunk
+                continue
+
+            # 协作式取消检测
+            if task_store.is_cancel_requested(task_id):
+                task_store.clear_cancel(task_id)
+                raise InterruptedError("用户取消了任务")
+
+            total_valid += len(chunk)
+            total_failed += failed_in_chunk
+
+            # --- 清洗：去空值 ---
+            cleaned = []
+            for log in chunk:
+                c = LogCleaner.clean_single(log)
+                if not LogCleaner.is_empty(c):
+                    cleaned.append(c)
+                else:
+                    total_empty += 1
+            del chunk
+
+            # --- 清洗：去重（跨批次全局） ---
+            unique = []
+            for log in cleaned:
+                raw = "|".join((
+                    log.get("timestamp", ""),
+                    log.get("level", ""),
+                    log.get("service", ""),
+                    log.get("message", ""),
+                ))
+                h = _hashlib.md5(raw.encode("utf-8", errors="replace")).digest()
+                if h not in seen_hashes:
+                    seen_hashes.add(h)
+                    unique.append(log)
+                else:
+                    total_dup += 1
+            del cleaned
+
+            # --- 入库 ---
+            if unique:
+                ins, skp = bulk_insert_logs(unique, batch_size=500)
+                total_inserted += ins
+                total_skipped += skp
+            del unique
+            gc.collect()
+
+            # --- 保存断点 ---
+            try:
+                with open(checkpoint_file, "w", encoding="utf-8") as f:
+                    json.dump({
+                        "csv_path": str(csv_path),
+                        "chunk_idx": chunk_idx,
+                        "total_valid": total_valid,
+                        "total_inserted": total_inserted,
+                    }, f)
+            except Exception:
+                pass  # 断点写入失败不阻断主流程
+
+            # 更新进度（每批刷新一次）
+            task_store.update_step(task_id, "parse", status="running",
+                                   detail={"valid_so_far": total_valid,
+                                           "failed_so_far": total_failed,
+                                           "chunks": chunk_idx})
+            task_store.update_step(task_id, "import", status="running",
+                                   detail={"inserted_so_far": total_inserted})
+
+        # 释放去重集合
+        del seen_hashes
+        gc.collect()
 
         parse_duration = time.time() - t0
+
+        if total_valid == 0:
+            raise ValueError(f"CSV 解析后无有效日志，失败 {total_failed} 条")
+
+        # 标记三步完成
         task_store.update_step(task_id, "parse", status="done",
                                detail={
-                                   "valid": len(valid_logs),
-                                   "failed": len(failed_logs),
-                                   "failed_log_path": str(failed_path) if failed_logs else None,
+                                   "valid": total_valid,
+                                   "failed": total_failed,
+                                   "chunks": chunk_idx,
                                },
                                duration_sec=round(parse_duration, 2))
-
-        if not valid_logs:
-            raise ValueError(f"CSV 解析后无有效日志，失败 {len(failed_logs)} 条")
-
-        # ---------- Step 2: 清洗 ----------
-        t0 = time.time()
-        task_store.update_step(task_id, "clean", status="running")
-        clean_result = LogCleaner.clean_batch(valid_logs)
-        cleaned_logs = clean_result["cleaned"]
-        clean_duration = time.time() - t0
-
         task_store.update_step(task_id, "clean", status="done",
                                detail={
-                                   "input": len(valid_logs),
-                                   "output": len(cleaned_logs),
-                                   "removed_empty": clean_result["removed_empty"],
-                                   "removed_duplicate": clean_result["removed_duplicate"],
+                                   "input": total_valid,
+                                   "output": total_valid - total_empty - total_dup,
+                                   "removed_empty": total_empty,
+                                   "removed_duplicate": total_dup,
                                },
-                               duration_sec=round(clean_duration, 2))
-
-        if not cleaned_logs:
-            raise ValueError("清洗后无有效日志可入库")
-
-        # ---------- Step 3: 入库 ----------
-        t0 = time.time()
-        task_store.update_step(task_id, "import", status="running")
-        # 延迟导入避免循环依赖
-        from scripts.import_logs import bulk_insert_logs
-        inserted, skipped = bulk_insert_logs(cleaned_logs, batch_size=500)
-        import_duration = time.time() - t0
-
+                               duration_sec=round(parse_duration, 2))
         task_store.update_step(task_id, "import", status="done",
                                detail={
-                                   "inserted": inserted,
-                                   "skipped_duplicate": skipped,
+                                   "inserted": total_inserted,
+                                   "skipped_duplicate": total_skipped,
                                },
-                               duration_sec=round(import_duration, 2))
+                               duration_sec=round(parse_duration, 2))
 
         # ---------- Step 4: 向量化（可选） ----------
         if vectorize:
@@ -383,19 +520,35 @@ def _run_pipeline(
             task_store.update_step(task_id, "vectorize", status="running",
                                    detail={"processed": 0, "total": 0})
 
-            from scripts.batch_vectorize import batch_vectorize
+            from services.batch_vectorize import batch_vectorize
 
             def _on_progress(processed: int, total: int):
                 task_store.update_step(task_id, "vectorize",
                                        detail={"processed": processed, "total": total})
 
-            batch_vectorize(
-                batch_size=100,
-                vector_batch_size=20,
-                resume=not rebuild_vector,
-                rebuild=rebuild_vector,
-                progress_callback=_on_progress,
-            )
+            # 协作式取消回调：batch_vectorize 每批开始前调用
+            # 返回 True 表示收到取消请求，会保存检查点后抛 InterruptedError
+            def _cancel_check() -> bool:
+                return task_store.is_cancel_requested(task_id)
+
+            try:
+                batch_vectorize(
+                    batch_size=256,
+                    vector_batch_size=64,
+                    resume=not rebuild_vector,
+                    rebuild=rebuild_vector,
+                    progress_callback=_on_progress,
+                    cancel_callback=_cancel_check,
+                )
+            except InterruptedError as cancel_err:
+                # 用户取消：清理取消标记，标记 vectorize 步骤为 cancelled
+                # 然后重新抛出，让外层 except 统一处理 task_store.finish
+                task_store.clear_cancel(task_id)
+                task_store.update_step(task_id, "vectorize", status="cancelled",
+                                       detail={"reason": str(cancel_err)})
+                # 取消后不清理中间文件（保留 checkpoint + CSV 以便重试）
+                raise
+
             vec_duration = time.time() - t0
             task_store.update_step(task_id, "vectorize", status="done",
                                    detail={"processed": "done"},
@@ -403,35 +556,67 @@ def _run_pipeline(
 
             # ---------- Step 4.5: 重建 BM25 索引 ----------
             # BM25 索引独立缓存于 bm25_index.pkl，与 SQLite/Qdrant 不会自动同步。
-            # 每次入库后必须重建，否则检索会返回旧数据（模拟数据残留就是这么来的）。
-            # rebuild_vector=True 时已经清空了 Qdrant，这里同样要重建 BM25。
+            # BM25Okapi 不支持增量更新，每次入库后必须全量重建。
+            # 使用流式加载 + 模板去重，避免千万级数据一次性加载导致 OOM。
             try:
                 t0 = time.time()
                 logger.info("🔨 开始重建 BM25 索引...")
+
+                # BM25 重建前检测取消（千万级日志重建可能耗时几分钟）
+                if task_store.is_cancel_requested(task_id):
+                    task_store.clear_cancel(task_id)
+                    raise InterruptedError("用户在 BM25 重建前取消了任务")
+
                 # 清除全局单例，强制从最新 DB 数据重建
                 import services.bm25_retriever as bm25_module
                 bm25_module._bm25_retriever = None
 
-                # 从 DB 加载全部日志作为 corpus
-                from core.database import SessionLocal
-                from models.log import Log
-                with SessionLocal() as sess:
-                    all_logs = sess.query(Log).order_by(Log.id).all()
-                corpus = [{
-                    "log_id": lg.id,
-                    "level": lg.level,
-                    "service": lg.service,
-                    "timestamp": lg.timestamp,
-                    "message": lg.message,
-                    "chunk_text": lg.message,
-                    "source": lg.service,
-                } for lg in all_logs]
+                # 流式加载 + 模板去重（与 rebuild_indexes.py 一致）
+                # rank_bm25 是纯 Python 实现，千万级文档会 MemoryError
+                # HDFS 等日志高度重复，模板去重后通常只剩几万条独立模板
+                from core.database import engine
+                from sqlalchemy import text
+                from services.batch_vectorize import normalize_template
+
+                seen_templates = {}  # template -> corpus item
+                processed = 0
+                fetch_batch = 50000
+
+                with engine.connect() as conn:
+                    result = conn.execution_options(stream_results=True).execute(
+                        text("SELECT id, level, service, timestamp, message FROM logs ORDER BY id")
+                    )
+                    while True:
+                        rows = result.fetchmany(fetch_batch)
+                        if not rows:
+                            break
+                        for row in rows:
+                            msg = row[4] or ""
+                            template = normalize_template(msg)
+                            if template not in seen_templates:
+                                seen_templates[template] = {
+                                    "log_id": row[0],
+                                    "level": row[1],
+                                    "service": row[2],
+                                    "timestamp": str(row[3]),
+                                    "message": msg,
+                                    "chunk_text": msg,
+                                    "source": row[2],
+                                }
+                        processed += len(rows)
+                        logger.info(f"📥 BM25 加载进度: {processed:,} 条已扫描, "
+                                    f"{len(seen_templates):,} 个独立模板")
+
+                dedup_corpus = list(seen_templates.values())
+                del seen_templates  # 释放内存
+
+                logger.info(f"📦 BM25 模板去重完成: {processed:,} → {len(dedup_corpus):,} 条")
 
                 from services.bm25_retriever import get_bm25_retriever
-                bm25 = get_bm25_retriever(corpus=corpus, cache_path="./bm25_index.pkl")
+                bm25 = get_bm25_retriever(corpus=dedup_corpus, cache_path="./bm25_index.pkl")
                 bm25_duration = time.time() - t0
-                logger.info(f"✅ BM25 索引重建完成: {len(corpus)} 条文档, "
-                            f"耗时 {bm25_duration:.2f}s")
+                logger.info(f"✅ BM25 索引重建完成: 原始 {processed:,} 条 → "
+                            f"模板 {len(dedup_corpus):,} 条, 耗时 {bm25_duration:.2f}s")
             except Exception as bm25_err:
                 # BM25 重建失败不阻断入库主流程，但记录错误
                 logger.error(f"⚠️ BM25 索引重建失败（不影响向量检索）: {bm25_err}", exc_info=True)
@@ -439,10 +624,15 @@ def _run_pipeline(
             task_store.update_step(task_id, "vectorize", status="skipped")
 
         # ---------- 完成 ----------
+        # 自动清理：删除断点续传检查点 + 中间 CSV（仅流水线生成的文件）
+        # 失败时不清理，保留以便重试。
+        cleanup_result = _cleanup_intermediate_files(csv_path, owns_csv)
+
         total_duration = time.time() - start_total
         task_store.update(task_id, artifacts={
             **(task_store.get(task_id).artifacts if task_store.get(task_id) else {}),
             "total_duration_sec": round(total_duration, 2),
+            "cleanup": cleanup_result,
         })
         task_store.finish(task_id, success=True)
         logger.info(f"入库任务完成: {task_id}, 总耗时 {total_duration:.1f}s")
